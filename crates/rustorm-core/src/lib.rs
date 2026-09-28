@@ -10,6 +10,7 @@
 //! - [`lexer`]: the syntax highlighter for the TUI and GUI editors.
 //! - [`io`]: loading, backups and atomic writes.
 //! - [`include`](mod@include): `Include` resolution the way ssh reads it.
+//! - [`keyspec`]: the value type and form group of every keyword.
 //! - [`ops`]: one method on [`Config`] per `rustorm` command.
 //! - [`workspace`]: the root and its included files as one [`Workspace`],
 //!   with every command routed to the file it changes.
@@ -24,6 +25,7 @@ pub mod figlet;
 pub mod include;
 pub mod io;
 pub mod keys;
+pub mod keyspec;
 pub mod lexer;
 pub mod model;
 pub mod ops;
@@ -45,6 +47,9 @@ pub use io::{
     resolve_config_path, write_text, write_text_with_backup, ConfigFile, WriteOptions,
 };
 pub use keys::{canonical_key, is_known_key, is_multi_valued, KNOWN_KEYS, MULTI_VALUED_KEYS};
+pub use keyspec::{
+    key_spec, key_specs, validate_setting, KeyGroup, KeySpec, KeyType, SettingChange,
+};
 pub use lexer::{lex, lex_document, lex_line, Lexer, Span, SpanKind};
 pub use model::{
     Banner, Config, Directive, DirectiveParts, Entry, HostBlock, HostLocation, Line, MatchBlock,

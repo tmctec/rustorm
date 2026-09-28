@@ -119,6 +119,15 @@ pub enum Error {
     #[error("{0} cannot be set on a host.")]
     ForbiddenKey(String),
 
+    /// A settings-form value that does not fit its keyword.
+    #[error("{key} {reason}.")]
+    InvalidSetting {
+        /// The keyword, canonical case.
+        key: String,
+        /// Why, e.g. "must be a port from 1 to 65535".
+        reason: String,
+    },
+
     /// The config file could not be read.
     #[error("cannot read {path}: {source}")]
     Read {
@@ -211,6 +220,7 @@ impl Error {
             | Error::NotAnAliasOf { .. }
             | Error::PrimaryName(_)
             | Error::ForbiddenKey(_)
+            | Error::InvalidSetting { .. }
             | Error::HostExistsIn { .. }
             | Error::AmbiguousSection { .. }
             | Error::AmbiguousFile { .. }

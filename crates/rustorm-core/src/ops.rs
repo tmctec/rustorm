@@ -11,6 +11,7 @@ use serde::Serialize;
 
 pub use crate::combine::{combine, CombineInput, CombineReport, OnConflict};
 use crate::keys;
+use crate::keyspec::SettingChange;
 use crate::model::{Banner, Config, Entry, HostBlock, HostLocation, Line, Section};
 use crate::uri::ConnectionUri;
 use crate::{Error, Result};
@@ -74,6 +75,43 @@ pub(crate) fn check_settable(key: &str) -> Result<()> {
         return Err(Error::ForbiddenKey(key.to_string()));
     }
     Ok(())
+}
+
+pub(crate) fn check_settings(changes: &[SettingChange]) -> Result<()> {
+    for c in changes {
+        check_settable(&c.key)?;
+        let key = crate::canonical_key(&c.key);
+        if c.values.len() > 1 && !keys::is_multi_valued(&key) {
+            return Err(Error::InvalidSetting {
+                key,
+                reason: "takes one value".into(),
+            });
+        }
+        for v in &c.values {
+            crate::validate_setting(&key, v).map_err(|reason| Error::InvalidSetting {
+                key: key.clone(),
+                reason,
+            })?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_settings(block: &mut HostBlock, changes: &[SettingChange]) {
+    for c in changes {
+        let mut values = c.values.iter();
+        match values.next() {
+            None => {
+                block.unset(&c.key);
+            }
+            Some(first) => {
+                block.set(&c.key, first.trim());
+                for v in values {
+                    block.append(&c.key, v.trim());
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn apply_pairs(block: &mut HostBlock, pairs: &[(String, String)], append: bool) {
@@ -667,6 +705,22 @@ impl Config {
         }
         self.finish();
         Ok(names)
+    }
+
+    /// The settings form: applies every change to host `name` in one go,
+    /// after checking each value against its keyword (see
+    /// [`validate_setting`](crate::validate_setting)). Returns the host's
+    /// primary name.
+    pub fn apply_settings(&mut self, name: &str, changes: &[SettingChange]) -> Result<String> {
+        check_settings(changes)?;
+        let loc = self
+            .find_host(name)
+            .ok_or_else(|| Error::HostNotFound(name.to_string()))?;
+        let block = self.host_mut(loc);
+        apply_settings(block, changes);
+        let primary = block.primary();
+        self.finish();
+        Ok(primary)
     }
 
     /// `unset`: removes every line of each key from the selected hosts. A
