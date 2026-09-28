@@ -1,0 +1,41 @@
+[workspace]
+members = [
+    "crates/rustorm-core",
+    "crates/rustorm",
+    "crates/rustorm-tui",
+    "crates/rustorm-gui",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "Apache-2.0"
+repository = "https://github.com/tmctec/rustorm"
+rust-version = "1.98"
+
+# Every crate the workspace uses is pinned here; member crates depend on them
+# with `{ workspace = true }` and never edit this manifest.
+# All are MIT, Apache-2.0 or dual-licensed (D20); `make licenses` enforces it.
+# rustorm itself is Apache-2.0 (see LICENSE and NOTICE).
+[workspace.dependencies]
+rustorm-core = { path = "crates/rustorm-core" }
+clap = { version = "4.6", features = ["derive"] }
+clap_complete = "4.6"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "1.1"
+regex = "1.13"
+thiserror = "2.0"
+anyhow = "1.0"
+tempfile = "3.27"
+dirs = "7.0"
+proptest = "1.11"
+# tui-textarea 0.7 builds against ratatui 0.29 and crossterm 0.28; keep the three in step.
+ratatui = "0.29"
+crossterm = "0.28"
+tui-textarea = "0.7"
+egui = "0.36"
+eframe = "0.36"
+egui_extras = "0.36"
+egui_kittest = "0.36"

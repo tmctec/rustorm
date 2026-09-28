@@ -1,0 +1,33 @@
+#!/usr/bin/env expect -f
+# ui-1 on a real pty: rustorm-tui draws the 3-host table within 2s, `q`
+# exits 0, and `stty -a` on the same pty afterwards shows echo and icanon on
+# (the terminal was restored). The pty under expect starts 0x0, so the
+# inner shell sets 40x150 first.
+# Usage: expect -f pty.exp <rustorm-tui binary> <config fixture>
+set timeout 10
+set bin [lindex $argv 0]
+set cfg [lindex $argv 1]
+set start [clock milliseconds]
+spawn script -q /dev/null sh -c "stty rows 40 cols 150; $bin --config '$cfg'; echo EXIT=\$?; stty -a"
+expect {
+    "Hosts 3/3" {}
+    timeout { puts "\nFAIL: table not drawn"; exit 2 }
+}
+foreach h {vps db web} {
+    expect {
+        $h {}
+        timeout { puts "\nFAIL: host $h not drawn"; exit 2 }
+    }
+}
+set drawn [expr {[clock milliseconds] - $start}]
+send "q"
+expect {
+    -re {EXIT=([0-9]+)} { set code $expect_out(1,string) }
+    timeout { puts "\nFAIL: no exit after q"; exit 3 }
+}
+expect eof
+set tail $expect_out(buffer)
+set restored [expr {[regexp {[^-]icanon} $tail] && [regexp {[^-]echo[ \r\n]} $tail] && ![regexp {\-icanon} $tail]}]
+puts "\nRESULT drawn_ms=$drawn exit=$code terminal_restored=$restored"
+if {$drawn > 2000 || $code != 0 || !$restored} { exit 1 }
+exit 0

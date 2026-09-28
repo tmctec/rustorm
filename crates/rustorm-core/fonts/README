@@ -1,0 +1,3 @@
+standard.flf is the FIGlet standard font, copied unmodified from the FIGlet 2.2.5
+distribution (BSD-3-Clause, see LICENSE-FIGLET). rustorm-core embeds it with
+include_str! to draw section banners.

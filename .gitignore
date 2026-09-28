@@ -1,0 +1,5 @@
+target/
+*~
+.claude/iterate/research/
+.claude/scheduled_tasks.lock
+.claude/

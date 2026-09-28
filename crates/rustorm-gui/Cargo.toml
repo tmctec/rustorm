@@ -1,0 +1,21 @@
+[package]
+name = "rustorm-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "rustorm-gui"
+path = "src/main.rs"
+
+[dependencies]
+rustorm-core = { workspace = true }
+egui = { workspace = true }
+eframe = { workspace = true }
+egui_extras = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+egui_kittest = { workspace = true }
+tempfile = { workspace = true }
