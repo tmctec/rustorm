@@ -3,7 +3,7 @@ Editor
 Sections
  ?:help  q:quit  Tab:focus  Enter:filter to section  R:rename section  n:new section                                                                  
 Table
- ?:help  q:quit  Tab:focus  1-7:sort  /:filter  f:col filter  x:clear  a:add  e:edit  Enter:settings  d:delete  c:clone  m:move  n:section  o:editor  
+ ?:help  q:quit  Tab:focus  1-7:sort  / f:filter  x:clear  a:add  e:edit  Enter:settings  d:delete  c:clone  m:move  n:new section  o:editor          
 ┌ Sections ──────────┐╔[Hosts 3/3]═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
 │All              3  │║Section        Host             User         HostName               Port   Proxy                                Jump          ║
 │bob              1  │║bob            vps              root         vps.example.com        2222   ·                                    ·             ║

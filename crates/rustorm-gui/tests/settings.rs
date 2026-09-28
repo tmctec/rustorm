@@ -235,3 +235,92 @@ fn tf_gui_8_unchanged_save_writes_nothing() {
     assert_eq!(f.read(), LAB);
     assert!(!f.backup().exists());
 }
+
+/// Drives the follow and All settings flows on a three-file workspace
+/// through the real widgets and writes what they show to the file named by
+/// `RUSTORM_GUI_EVIDENCE`. Run with `--ignored`.
+#[test]
+#[ignore]
+fn gui_walkthrough_evidence() {
+    use std::fmt::Write as _;
+    let out_path = std::env::var("RUSTORM_GUI_EVIDENCE").expect("RUSTORM_GUI_EVIDENCE");
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().join("config.d");
+    std::fs::create_dir(&d).unwrap();
+    let root = dir.path().join("config");
+    std::fs::write(
+        &root,
+        format!(
+            "# root\nInclude {}/*\n\nHost github\n    User git\n",
+            d.display()
+        ),
+    )
+    .unwrap();
+    let ranch = d.join("ranch");
+    let before = "# ranch machines\nHost dcevant\n    # the old box\n    HostName dcevant.ranch.lan\n\nHost ranch-nas\n    HostName nas.ranch.lan\n    Compression yes\n";
+    std::fs::write(&ranch, before).unwrap();
+    std::fs::write(
+        d.join("cypress"),
+        "Host cypressPro\n    HostName 10.0.0.2\n",
+    )
+    .unwrap();
+    let mut out = String::new();
+    let mut h = harness(&root);
+    h.run();
+    for host in ["cypressPro", "ranch-nas"] {
+        click(&mut h, host);
+        let s = h.state();
+        let ws = s.workspace();
+        writeln!(
+            out,
+            "click {host}: tab {:?}, editor file {}, cursor queued for line {:?}",
+            s.tab,
+            ws.file_name(s.current_file()),
+            s.pending_editor_line()
+        )
+        .unwrap();
+    }
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num2);
+    h.run();
+    let s = h.state();
+    let line = s.editor_line().unwrap();
+    writeln!(
+        out,
+        "Cmd+2: tab {:?}, editor line {line}: {:?}",
+        s.tab,
+        s.buffer(s.current_file()).lines().nth(line - 1).unwrap()
+    )
+    .unwrap();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num1);
+    h.run();
+    click(&mut h, "All settings");
+    click(&mut h, "Forwarding");
+    let labels: Vec<String> = ["ForwardAgent", "LocalForward", "GatewayPorts", "Tunnel"]
+        .iter()
+        .filter(|k| h.query_all_by_label(k).next().is_some())
+        .map(|k| k.to_string())
+        .collect();
+    writeln!(
+        out,
+        "All settings > Forwarding shows: {}",
+        labels.join(", ")
+    )
+    .unwrap();
+    type_into(&mut h, "ForwardAgent", "yes");
+    type_into(&mut h, "LocalForward", "8080 localhost:80");
+    click(&mut h, "Forwarding");
+    click(&mut h, "Multiplexing");
+    pick(&mut h, "ControlMaster", "auto");
+    click(&mut h, "Save settings");
+    writeln!(out, "Save settings: status {:?}", h.state().status()).unwrap();
+    let after = std::fs::read_to_string(&ranch).unwrap();
+    writeln!(out, "--- config.d/ranch before\n{before}--- after\n{after}").unwrap();
+    let backups: Vec<String> = std::fs::read_dir(&d)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .filter(|n| n.ends_with('~'))
+        .collect();
+    writeln!(out, "backups: {backups:?}").unwrap();
+    std::fs::write(out_path, out).unwrap();
+    assert!(after.contains("ControlMaster auto"));
+}

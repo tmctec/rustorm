@@ -818,3 +818,22 @@ fn follow_tui_12_o_still_focuses_the_editor() {
         (host_line(&read(&m.ranch), "dcevant"), 0)
     );
 }
+
+/// follow-tui-13: after the file list moves the editor to another file,
+/// returning to the table puts it back on the selected host.
+#[test]
+fn follow_tui_13_back_to_table_resyncs_the_host() {
+    let m = Multi::new();
+    let mut app = m.app();
+    select(&mut app, "cypressPro");
+    press(&mut app, 'F');
+    press(&mut app, 'G');
+    assert_eq!(app.shown_file(), m.ranch.as_path());
+    app.handle(key(KeyCode::Esc));
+    assert_eq!(app.focus(), rustorm_tui::Focus::Table);
+    assert_eq!(app.shown_file(), m.cypress.as_path());
+    assert_eq!(
+        app.editor_cursor(),
+        (host_line(&read(&m.cypress), "cypressPro"), 0)
+    );
+}

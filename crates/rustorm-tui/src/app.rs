@@ -480,6 +480,9 @@ pub struct App {
     editors: Vec<Editor>,
     /// The file the editor shows.
     cur: usize,
+    /// The file list moved the editor off the selected host; the table
+    /// puts it back when it regains focus.
+    detached: bool,
     msg: Option<Msg>,
     quit: bool,
 }
@@ -512,6 +515,7 @@ impl App {
             mode: Mode::Normal,
             editors,
             cur: 0,
+            detached: false,
             msg: None,
             quit: false,
         };
@@ -680,6 +684,7 @@ impl App {
         };
         let (name, fi) = (row.name.clone(), row.file_index);
         self.show_file(fi);
+        self.detached = false;
         let line = self.editors[fi].find_host_line(&name).or_else(|| {
             let config = &self.ws.files[fi].config;
             config
@@ -692,21 +697,31 @@ impl App {
     }
 
     /// Makes the editor follow the browsing panes (docs/tui.md, Editor): a
-    /// new selected host shows at its `Host` line; a new highlight in the
-    /// file list shows that file. An unchanged selection leaves the editor
-    /// and its cursor alone.
+    /// new highlight in the file list shows that file; a new selected host,
+    /// or the table regaining focus after the file list moved the editor,
+    /// shows the host at its `Host` line. Otherwise the editor and its
+    /// cursor stay put.
     fn follow(&mut self, files_sel: usize, host: Option<String>) {
-        if self.selected() != host.as_deref() && self.selected().is_some() {
-            self.show_selected_host();
-        } else if self.files_sel != files_sel {
+        if self.files_sel != files_sel && self.focus == Focus::Files {
             if let Some(FileState::Loaded(i)) = self
                 .ws
                 .load_order
                 .get(self.files_sel)
                 .map(|e| e.state.clone())
             {
-                self.cur = i;
+                if i != self.cur {
+                    self.cur = i;
+                    self.detached = true;
+                }
             }
+            return;
+        }
+        let Some(sel) = self.selected() else {
+            return;
+        };
+        let moved = host.as_deref() != Some(sel);
+        if moved || (self.detached && self.focus == Focus::Table) {
+            self.show_selected_host();
         }
     }
 
@@ -1863,7 +1878,7 @@ impl App {
             }
             (Mode::Help, _) => "Esc/?:close help",
             (_, Focus::Table) if multi => {
-                "?:help  q:quit  Tab:focus  F:files  1-8:sort  /:filter  f:col filter  x:clear  a:add  e:edit  Enter:settings  d:delete  c:clone  m:move  n:section  o:editor"
+                "?:help  q:quit  Tab:focus  F:files  1-8:sort  / f:filter  x:clear  a:add  e:edit  Enter:settings  d:delete  c:clone  m:move  n:new section  o:editor"
             }
             (_, Focus::Sections) if multi => {
                 "?:help  q:quit  Tab:focus  F:files  Enter:filter to section  R:rename section  n:new section"
@@ -1872,7 +1887,7 @@ impl App {
                 "?:help  q:quit  Tab:focus  j/k:move  Enter:show in editor  Esc:back to table"
             }
             (_, Focus::Table) => {
-                "?:help  q:quit  Tab:focus  1-7:sort  /:filter  f:col filter  x:clear  a:add  e:edit  Enter:settings  d:delete  c:clone  m:move  n:section  o:editor"
+                "?:help  q:quit  Tab:focus  1-7:sort  / f:filter  x:clear  a:add  e:edit  Enter:settings  d:delete  c:clone  m:move  n:new section  o:editor"
             }
             (_, Focus::Sections) => {
                 "?:help  q:quit  Tab:focus  Enter:filter to section  R:rename section  n:new section"
