@@ -3,7 +3,7 @@ Editor
 Sections
  ?:help  q:quit  Tab:focus  Enter:filter to section  R:rename section  n:new section                                                                  
 Table
- ?:help  q:quit  Tab:focus  1-7:sort  /:filter  f:column filter  x:clear  a:add  e:edit  d:delete  c:clone  m:move  n:new section  o:editor           
+ ?:help  q:quit  Tab:focus  1-7:sort  /:filter  f:col filter  x:clear  a:add  e:edit  Enter:settings  d:delete  c:clone  m:move  n:section  o:editor  
 ┌ Sections ──────────┐╔[Hosts 3/3]═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
 │All              3  │║Section        Host             User         HostName               Port   Proxy                                Jump          ║
 │bob              1  │║bob            vps              root         vps.example.com        2222   ·                                    ·             ║
@@ -25,18 +25,18 @@ Table
 └────────────────────┘╚════════════════║ x                table                 clear filters                 ║══════════════════════════════════════╝
 ┌ Editor <CONFIG>  ln 1 c║ Enter            sections              filter to section             ║
 │# my ssh config                       ║ a                table                 add host                      ║                                      │
-│Host *                                ║ e / Enter        table                 edit host                     ║                                      │
-│    ServerAliveInterval 60            ║ d                table                 delete host                   ║                                      │
-│                                      ║ c                table                 clone host                    ║                                      │
-│#-------------------------------------║ m                table                 move or rename host           ║                                      │
+│Host *                                ║ e                table                 edit host (quick form)        ║                                      │
+│    ServerAliveInterval 60            ║ Enter            table                 all settings of host          ║                                      │
+│                                      ║ d                table                 delete host                   ║                                      │
+│#-------------------------------------║ c                table                 clone host                    ║                                      │
+│#                                     ║ m                table                 move or rename host           ║                                      │
 │#                                     ║ R                sections              rename section                ║                                      │
 │#                                     ║ n                table, sections       new empty section             ║                                      │
 │#                                     ║ o                table                 open editor at host           ║                                      │
 │#                                     ║ Ctrl-S           editor                save                          ║                                      │
 │#                                     ║ Ctrl-R           editor                discard edits                 ║                                      │
 │#                                     ║ Esc              editor, form, prompt  back / cancel                 ║                                      │
-│#                                     ╚══════════════════════════════════════════════════════════════════════╝                                      │
-│#-----------------------------------------------------------------------------------------------------#                                             │
+│#-------------------------------------╚══════════════════════════════════════════════════════════════════════╝                                      │
 │                                                                                                                                                    │
 │Host vps                                                                                                                                            │
 │    HostName vps.example.com                                                                                                                        │

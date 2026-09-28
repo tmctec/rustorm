@@ -53,7 +53,10 @@ fn ks_2_choices_match_the_man_page() {
     assert_eq!(values("AddressFamily"), ["any", "inet", "inet6"]);
     assert_eq!(key_spec("Compression").unwrap().kind, KeyType::Flag);
     assert_eq!(key_spec("ProxyCommand").unwrap().group, KeyGroup::Proxy);
-    assert_eq!(key_spec("ControlPath").unwrap().group, KeyGroup::Multiplexing);
+    assert_eq!(
+        key_spec("ControlPath").unwrap().group,
+        KeyGroup::Multiplexing
+    );
     assert!(validate_setting("StrictHostKeyChecking", "accept-new").is_ok());
     assert!(validate_setting("StrictHostKeyChecking", "sometimes").is_err());
     assert!(validate_setting("ControlPersist", "10m").is_ok());

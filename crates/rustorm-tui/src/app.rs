@@ -14,11 +14,12 @@ use ratatui::widgets::{
 use ratatui::Frame;
 use rustorm_core::{
     join_and, AddSpec, Change, CloneSpec, Config, EditSpec, Env, Error, FileState, HostSelector,
-    ProblemKind, SectionRename, Workspace, WriteOptions,
+    ProblemKind, SectionRename, SettingChange, Workspace, WriteOptions,
 };
 
 use crate::editor::Editor;
 use crate::hosts::{self, Column, Filters, Row, Sort};
+use crate::settings::SettingsForm;
 use crate::theme::Theme;
 
 /// Startup settings.
@@ -119,6 +120,10 @@ enum Op {
     AddSection {
         name: String,
     },
+    Settings {
+        name: String,
+        changes: Vec<SettingChange>,
+    },
 }
 
 impl Op {
@@ -128,6 +133,7 @@ impl Op {
             Op::Edit { spec, .. } => Some(&spec.name),
             Op::Delete(n) => Some(n),
             Op::Move { name, .. } => Some(name),
+            Op::Settings { name, .. } => Some(name),
             _ => None,
         }
     }
@@ -138,6 +144,7 @@ impl Op {
             Op::Add(s) => Some(s.name.clone()),
             Op::Edit { spec, .. } => Some(spec.name.clone()),
             Op::Clone(s) => Some(s.new_name.clone()),
+            Op::Settings { name, .. } => Some(name.clone()),
             Op::Move { name, new_name, .. } => Some(new_name.clone().unwrap_or(name.clone())),
             _ => None,
         }
@@ -169,6 +176,7 @@ enum Mode {
     Normal,
     Help,
     Form(Form),
+    Settings(SettingsForm),
     Prompt(Prompt),
     PickFilterColumn,
     Filter {
@@ -280,6 +288,10 @@ fn apply(cfg: &mut Config, op: &Op, env: &Env) -> Result<String, Error> {
                 None => format!("section {name} added."),
             })
         }
+        Op::Settings { name, changes } => {
+            let n = cfg.apply_settings(name, changes)?;
+            Ok(format!("{n} updated."))
+        }
     }
 }
 
@@ -321,6 +333,7 @@ fn apply_ws(ws: &mut Workspace, op: &Op, env: &Env) -> Result<String, Error> {
             change_text(ws.rename_section(old, new, file.as_deref())?)
         }
         Op::AddSection { name } => change_text(ws.add_section(name, None, None)?),
+        Op::Settings { name, changes } => change_text(ws.apply_settings(name, changes, None)?),
     })
 }
 
@@ -433,7 +446,8 @@ const HELP: &[(&str, &str, &str)] = &[
     ("x", "table", "clear filters"),
     ("Enter", "sections", "filter to section"),
     ("a", "table", "add host"),
-    ("e / Enter", "table", "edit host"),
+    ("e", "table", "edit host (quick form)"),
+    ("Enter", "table", "all settings of host"),
     ("d", "table", "delete host"),
     ("c", "table", "clone host"),
     ("m", "table", "move or rename host"),
@@ -574,6 +588,15 @@ impl App {
             .collect()
     }
 
+    /// The settings form's focused keyword and its value, while the form
+    /// is open.
+    pub fn settings_row(&self) -> Option<(&str, &str)> {
+        match &self.mode {
+            Mode::Settings(f) => Some((f.row().spec.key, f.row().value.as_str())),
+            _ => None,
+        }
+    }
+
     /// The active filters.
     pub fn filters(&self) -> &Filters {
         &self.filters
@@ -676,8 +699,11 @@ impl App {
         if self.selected() != host.as_deref() && self.selected().is_some() {
             self.show_selected_host();
         } else if self.files_sel != files_sel {
-            if let Some(FileState::Loaded(i)) =
-                self.ws.load_order.get(self.files_sel).map(|e| e.state.clone())
+            if let Some(FileState::Loaded(i)) = self
+                .ws
+                .load_order
+                .get(self.files_sel)
+                .map(|e| e.state.clone())
             {
                 self.cur = i;
             }
@@ -790,6 +816,9 @@ impl App {
             self.editors[i].set_text(&self.ws.files[i].original);
         }
         self.refresh(op.focus_name().as_deref());
+        // Every buffer was reloaded, so its cursor went home: put the
+        // editor back on the selected host.
+        self.show_selected_host();
         self.msg = Some(Msg::Success(msg));
         Ok(true)
     }
@@ -1076,6 +1105,70 @@ impl App {
         self.mode = Mode::Form(form);
     }
 
+    fn open_settings(&mut self) {
+        if !self.dirty().is_empty() {
+            self.error("Save or discard the editor's changes first.");
+            return;
+        }
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        let (name, fi) = (row.name.clone(), row.file_index);
+        let config = &self.ws.files[fi].config;
+        let Some(loc) = config.find_primary(&name) else {
+            return;
+        };
+        let defaults = self.ws.files.iter().find_map(|f| f.config.defaults());
+        self.mode = Mode::Settings(SettingsForm::new(&name, config.host(loc), defaults));
+    }
+
+    fn handle_settings(&mut self, mut form: SettingsForm, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Esc => {
+                self.msg = Some(Msg::Info("Cancelled.".into()));
+                return;
+            }
+            KeyCode::Down | KeyCode::Tab => form.move_by(1),
+            KeyCode::Up | KeyCode::BackTab => form.move_by(-1),
+            KeyCode::PageDown => form.jump_group(true),
+            KeyCode::PageUp => form.jump_group(false),
+            KeyCode::Home => form.focus = 0,
+            KeyCode::End => form.focus = form.rows.len() - 1,
+            KeyCode::Right => form.cycle(true),
+            KeyCode::Left => form.cycle(false),
+            KeyCode::Char(' ') => form.space(),
+            KeyCode::Char('u') if ctrl => form.clear(),
+            KeyCode::Backspace => form.backspace(),
+            KeyCode::Enter => {
+                let changes = match form.changes() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        form.error = Some(e);
+                        self.mode = Mode::Settings(form);
+                        return;
+                    }
+                };
+                if changes.is_empty() {
+                    self.msg = Some(Msg::Info("No changes.".into()));
+                    return;
+                }
+                let name = form.host.clone();
+                if let Err(e) = self.run_op(Op::Settings { name, changes }, false) {
+                    form.error = Some(e);
+                    if matches!(self.mode, Mode::Normal) {
+                        self.mode = Mode::Settings(form);
+                    }
+                }
+                return;
+            }
+            KeyCode::Char(c) if !ctrl => form.type_char(c),
+            _ => {}
+        }
+        form.grow();
+        self.mode = Mode::Settings(form);
+    }
+
     // ----- key handling -----
 
     /// Handles one key event.
@@ -1119,6 +1212,7 @@ impl App {
                 }
             }
             Mode::Form(form) => self.handle_form(form, key),
+            Mode::Settings(form) => self.handle_settings(form, key),
             Mode::Prompt(p) => self.handle_prompt(p, key),
             Mode::PickFilterColumn => {
                 if let KeyCode::Char(c) = key.code {
@@ -1334,7 +1428,12 @@ impl App {
                 self.view_changed();
             }
             KeyCode::Char('a') => self.open_form(FormKind::Add),
-            KeyCode::Char('e') | KeyCode::Enter => {
+            KeyCode::Enter => {
+                if need_host(self).is_some() {
+                    self.open_settings();
+                }
+            }
+            KeyCode::Char('e') => {
                 if let Some(name) = need_host(self) {
                     let fi = self.selected_row().map_or(0, |r| r.file_index);
                     let config = &self.ws.files[fi].config;
@@ -1517,6 +1616,7 @@ impl App {
         match self.mode.clone() {
             Mode::Help => self.render_help(frame, area),
             Mode::Form(form) => self.render_form(frame, area, &form),
+            Mode::Settings(form) => self.render_settings(frame, area, &form),
             Mode::Prompt(p) => self.render_prompt(frame, area, &p),
             _ => {}
         }
@@ -1754,13 +1854,16 @@ impl App {
         let multi = self.ws.is_multi();
         let text = match (&self.mode, self.focus) {
             (Mode::Form(_), _) => "Enter:submit  Tab:next field  Shift-Tab:previous  Esc:cancel",
+            (Mode::Settings(_), _) => {
+                "Enter:save  Up/Down:move  Space/Left/Right:cycle  Ctrl-U:clear  PgUp/PgDn:group  Esc:cancel"
+            }
             (Mode::Prompt(_), _) => "answer the prompt  Esc:cancel",
             (Mode::Filter { .. }, _) | (Mode::PickFilterColumn, _) => {
                 "type to filter  Enter:keep  Esc:undo"
             }
             (Mode::Help, _) => "Esc/?:close help",
             (_, Focus::Table) if multi => {
-                "?:help  q:quit  Tab:focus  F:files  1-8:sort  /:filter  f:column filter  x:clear  a:add  e:edit  d:delete  c:clone  m:move  n:new section  o:editor"
+                "?:help  q:quit  Tab:focus  F:files  1-8:sort  /:filter  f:col filter  x:clear  a:add  e:edit  Enter:settings  d:delete  c:clone  m:move  n:section  o:editor"
             }
             (_, Focus::Sections) if multi => {
                 "?:help  q:quit  Tab:focus  F:files  Enter:filter to section  R:rename section  n:new section"
@@ -1769,7 +1872,7 @@ impl App {
                 "?:help  q:quit  Tab:focus  j/k:move  Enter:show in editor  Esc:back to table"
             }
             (_, Focus::Table) => {
-                "?:help  q:quit  Tab:focus  1-7:sort  /:filter  f:column filter  x:clear  a:add  e:edit  d:delete  c:clone  m:move  n:new section  o:editor"
+                "?:help  q:quit  Tab:focus  1-7:sort  /:filter  f:col filter  x:clear  a:add  e:edit  Enter:settings  d:delete  c:clone  m:move  n:section  o:editor"
             }
             (_, Focus::Sections) => {
                 "?:help  q:quit  Tab:focus  Enter:filter to section  R:rename section  n:new section"
@@ -1830,6 +1933,78 @@ impl App {
         frame.render_widget(Clear, rect);
         frame.render_widget(
             Paragraph::new(lines).block(self.pane_block(form.title.clone(), true)),
+            rect,
+        );
+    }
+
+    fn render_settings(&self, frame: &mut Frame, area: Rect, form: &SettingsForm) {
+        let theme = self.opts.theme;
+        let width = area.width.saturating_sub(4).clamp(20, 110);
+        let height = area.height.saturating_sub(2).max(8);
+        let rect = centered(area, width, height);
+        // Rows of text inside the border, less the error and help lines.
+        let room = height.saturating_sub(4) as usize;
+        let mut lines: Vec<(Line, bool)> = Vec::new();
+        let mut group = None;
+        for (i, r) in form.rows.iter().enumerate() {
+            if group != Some(r.spec.group) {
+                group = Some(r.spec.group);
+                lines.push((
+                    Line::from(Span::styled(
+                        format!("── {} ", r.spec.group.title()),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    false,
+                ));
+            }
+            let focused = i == form.focus;
+            let marker = match (focused, r.changed()) {
+                (true, _) => "> ",
+                (false, true) => "* ",
+                _ => "  ",
+            };
+            let key = Span::styled(
+                format!("{marker}{:<32}", r.spec.key),
+                if focused {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                },
+            );
+            let value = if r.value.is_empty() {
+                match (&r.inherited, focused) {
+                    (Some(v), _) => Span::styled(format!("({v} from Host *)"), theme.muted()),
+                    (None, true) => Span::raw(theme.caret().to_string()),
+                    (None, false) => Span::styled(theme.missing(), theme.muted()),
+                }
+            } else if focused {
+                Span::raw(format!("{}{}", r.value, theme.caret()))
+            } else {
+                Span::raw(r.value.clone())
+            };
+            lines.push((Line::from(vec![key, value]), focused));
+        }
+        let at = lines.iter().position(|(_, f)| *f).unwrap_or(0);
+        let top = at
+            .saturating_sub(room / 2)
+            .min(lines.len().saturating_sub(room));
+        let mut shown: Vec<Line> = lines
+            .into_iter()
+            .skip(top)
+            .take(room)
+            .map(|(l, _)| l)
+            .collect();
+        shown.push(match &form.error {
+            Some(e) => Line::from(Span::styled(format!("Error: {e}"), theme.error())),
+            None => Line::from(""),
+        });
+        shown.push(Line::from(Span::styled(
+            "Enter: save  Space/Left/Right: cycle  Ctrl-U: clear  PgUp/PgDn: group  Esc: cancel",
+            theme.muted(),
+        )));
+        frame.render_widget(Clear, rect);
+        frame.render_widget(
+            Paragraph::new(shown).block(self.pane_block(format!("Settings {}", form.host), true)),
             rect,
         );
     }

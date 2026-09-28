@@ -511,8 +511,8 @@ impl App {
             return;
         };
         self.select_file(wl.file);
-        let line = buffer_host_line(&self.buffers[wl.file], name)
-            .unwrap_or_else(|| self.ws.host_line(wl));
+        let line =
+            buffer_host_line(&self.buffers[wl.file], name).unwrap_or_else(|| self.ws.host_line(wl));
         self.goto_line = Some(line);
     }
 

@@ -1140,8 +1140,9 @@ impl Workspace {
         crate::ops::check_settings(changes)?;
         let target = self.target(file)?;
         let selector = HostSelector::Name(name.to_string());
-        let (names, files, warnings) =
-            self.update_hosts(&selector, target, |b| crate::ops::apply_settings(b, changes))?;
+        let (names, files, warnings) = self.update_hosts(&selector, target, |b| {
+            crate::ops::apply_settings(b, changes)
+        })?;
         let msg = self.updated_message(&selector, &names, &files);
         Ok(self.change(names, files, vec![msg], warnings))
     }

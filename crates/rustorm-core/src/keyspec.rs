@@ -97,18 +97,20 @@ fn classify(key: &str) -> (KeyGroup, KeyType) {
         | "LocalCommand" | "SendEnv" | "SetEnv" | "IPQoS" | "RekeyLimit" | "ChannelTimeout"
         | "LogVerbose" | "Tag" => (Connection, Text),
         "Port" => (Connection, Port),
-        "ConnectTimeout" | "ConnectionAttempts" | "ServerAliveInterval"
-        | "ServerAliveCountMax" => (Connection, Number),
-        "TCPKeepAlive" | "Compression" | "StdinNull" | "ForkAfterAuthentication"
-        | "EnableEscapeCommandline" | "PermitLocalCommand" | "BatchMode" | "RefuseConnection" => {
-            (Connection, Flag)
+        "ConnectTimeout" | "ConnectionAttempts" | "ServerAliveInterval" | "ServerAliveCountMax" => {
+            (Connection, Number)
         }
+        "TCPKeepAlive"
+        | "Compression"
+        | "StdinNull"
+        | "ForkAfterAuthentication"
+        | "EnableEscapeCommandline"
+        | "PermitLocalCommand"
+        | "BatchMode"
+        | "RefuseConnection" => (Connection, Flag),
         "AddressFamily" => (Connection, choice(&["any", "inet", "inet6"], false)),
         "RequestTTY" => (Connection, choice(&["no", "yes", "force", "auto"], false)),
-        "SessionType" => (
-            Connection,
-            choice(&["none", "subsystem", "default"], false),
-        ),
+        "SessionType" => (Connection, choice(&["none", "subsystem", "default"], false)),
         "ObscureKeystrokeTiming" => (Connection, choice(YES_NO, true)),
         "LogLevel" => (
             Connection,
@@ -131,14 +133,27 @@ fn classify(key: &str) -> (KeyGroup, KeyType) {
             ),
         ),
 
-        "IdentityFile" | "IdentityAgent" | "CertificateFile" | "PKCS11Provider"
-        | "SecurityKeyProvider" | "UserKnownHostsFile" | "GlobalKnownHostsFile"
+        "IdentityFile"
+        | "IdentityAgent"
+        | "CertificateFile"
+        | "PKCS11Provider"
+        | "SecurityKeyProvider"
+        | "UserKnownHostsFile"
+        | "GlobalKnownHostsFile"
         | "RevokedHostKeys" => (Authentication, Path),
-        "IdentitiesOnly" | "UseKeychain" | "PasswordAuthentication"
-        | "KbdInteractiveAuthentication" | "ChallengeResponseAuthentication"
-        | "GSSAPIAuthentication" | "GSSAPIDelegateCredentials" | "HostbasedAuthentication"
-        | "HashKnownHosts" | "CheckHostIP" | "VisualHostKey"
-        | "NoHostAuthenticationForLocalhost" | "EnableSSHKeysign" => (Authentication, Flag),
+        "IdentitiesOnly"
+        | "UseKeychain"
+        | "PasswordAuthentication"
+        | "KbdInteractiveAuthentication"
+        | "ChallengeResponseAuthentication"
+        | "GSSAPIAuthentication"
+        | "GSSAPIDelegateCredentials"
+        | "HostbasedAuthentication"
+        | "HashKnownHosts"
+        | "CheckHostIP"
+        | "VisualHostKey"
+        | "NoHostAuthenticationForLocalhost"
+        | "EnableSSHKeysign" => (Authentication, Flag),
         "AddKeysToAgent" => (
             Authentication,
             choice(&["yes", "no", "ask", "confirm"], true),
@@ -156,12 +171,18 @@ fn classify(key: &str) -> (KeyGroup, KeyType) {
         }
         "FingerprintHash" => (Authentication, choice(&["md5", "sha256"], false)),
         "NumberOfPasswordPrompts" => (Authentication, Number),
-        "PreferredAuthentications" | "KbdInteractiveDevices" | "KnownHostsCommand"
+        "PreferredAuthentications"
+        | "KbdInteractiveDevices"
+        | "KnownHostsCommand"
         | "HostKeyAlias" => (Authentication, Text),
 
         "ForwardAgent" => (Forwarding, choice(YES_NO, true)),
-        "ForwardX11" | "ForwardX11Trusted" | "GatewayPorts" | "ExitOnForwardFailure"
-        | "ClearAllForwardings" | "StreamLocalBindUnlink" => (Forwarding, Flag),
+        "ForwardX11"
+        | "ForwardX11Trusted"
+        | "GatewayPorts"
+        | "ExitOnForwardFailure"
+        | "ClearAllForwardings"
+        | "StreamLocalBindUnlink" => (Forwarding, Flag),
         "LocalForward" | "RemoteForward" | "DynamicForward" => (Forwarding, Forward),
         "XAuthLocation" => (Forwarding, Path),
         "Tunnel" => (
@@ -182,10 +203,7 @@ fn classify(key: &str) -> (KeyGroup, KeyType) {
         "ControlPath" => (Multiplexing, Path),
         "ControlPersist" => (Multiplexing, choice(YES_NO, true)),
 
-        "CanonicalizeHostname" => (
-            Advanced,
-            choice(&["no", "yes", "always", "none"], false),
-        ),
+        "CanonicalizeHostname" => (Advanced, choice(&["no", "yes", "always", "none"], false)),
         "CanonicalizeFallbackLocal" => (Advanced, Flag),
         "CanonicalizeMaxDots" | "RequiredRSASize" => (Advanced, Number),
         "WarnWeakCrypto" => (Advanced, choice(YES_NO, true)),

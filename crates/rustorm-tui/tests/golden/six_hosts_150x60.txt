@@ -57,4 +57,4 @@
 │    ProxyCommand corkscrew                                                                                                                          │
 └────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
  gnu -> carol@gnu.example.com:22                                                                                                                      
- ?:help  q:quit  Tab:focus  1-7:sort  /:filter  f:column filter  x:clear  a:add  e:edit  d:delete  c:clone  m:move  n:new section  o:editor           
+ ?:help  q:quit  Tab:focus  1-7:sort  /:filter  f:col filter  x:clear  a:add  e:edit  Enter:settings  d:delete  c:clone  m:move  n:section  o:editor  
