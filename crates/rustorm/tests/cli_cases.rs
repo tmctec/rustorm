@@ -713,7 +713,10 @@ fn inc_10_set_writes_the_file_holding_the_host() {
     // The dot backup is not loaded on the next run: no duplicate warning.
     let out = home.run(&["set", "cypressPro-ext", "Port", "23"]);
     assert_eq!(err(&out), "");
-    assert_eq!(text(&home.run(&["includes"])).lines().last(), Some("5 files, 8 hosts."));
+    assert_eq!(
+        text(&home.run(&["includes"])).lines().last(),
+        Some("5 files, 8 hosts.")
+    );
 }
 
 #[test]
@@ -736,7 +739,8 @@ fn inc_11_move_between_files_backs_up_both_and_names_both() {
         ]
     );
     assert!(!ssh_text(&home, "config.d/ranch").contains("dcevant"));
-    assert!(ssh_text(&home, "config.d/df-austin").contains("Host dcevant\n    HostName dcevant.ranch.lan"));
+    assert!(ssh_text(&home, "config.d/df-austin")
+        .contains("Host dcevant\n    HostName dcevant.ranch.lan"));
 }
 
 #[test]
@@ -746,7 +750,11 @@ fn inc_13_file_resolves_a_bare_name_a_path_and_refuses_an_unknown_name() {
     let out = home.run(&["add", "x1", "root@h", "--file", "cypress"]);
     assert_eq!(out.status.code(), Some(0), "{}", err(&out));
     assert!(ssh_text(&home, "config.d/cypress").contains("Host x1\n"));
-    assert!(text(&out).contains("~/.ssh/config.d/cypress"), "{}", text(&out));
+    assert!(
+        text(&out).contains("~/.ssh/config.d/cypress"),
+        "{}",
+        text(&out)
+    );
     // A path, used as given.
     let ranch = home.path().join(".ssh/config.d/ranch");
     let out = home.run(&["-f", ranch.to_str().unwrap(), "add", "x2", "root@h"]);
@@ -764,8 +772,14 @@ fn inc_13_file_resolves_a_bare_name_a_path_and_refuses_an_unknown_name() {
     assert!(changed(&before, &snapshot(&home)).is_empty());
     // dump --file prints that file; --file on list is a usage error.
     let out = home.run(&["dump", "--file", "df-austin"]);
-    assert_eq!(out.stdout, std::fs::read(home.path().join(".ssh/config.d/df-austin")).unwrap());
-    assert_eq!(home.run(&["list", "--file", "cypress"]).status.code(), Some(2));
+    assert_eq!(
+        out.stdout,
+        std::fs::read(home.path().join(".ssh/config.d/df-austin")).unwrap()
+    );
+    assert_eq!(
+        home.run(&["list", "--file", "cypress"]).status.code(),
+        Some(2)
+    );
 }
 
 #[test]
@@ -777,7 +791,8 @@ fn inc_15_check_reports_the_duplicate_the_backup_and_the_include_in_host_star() 
     )
     .unwrap();
     std::fs::write(
-        home.path().join(".ssh/config.d/df-austin.bak.20260628232757"),
+        home.path()
+            .join(".ssh/config.d/df-austin.bak.20260628232757"),
         "Host dcaustin-pfsense\n    HostName 10.20.0.1\n    User admin\n",
     )
     .unwrap();
@@ -837,7 +852,8 @@ fn inc_16_includes_lists_the_workspace_in_text_and_json() {
 fn inc_17_every_json_row_carries_its_file() {
     let home = workspace_home();
     std::fs::write(
-        home.path().join(".ssh/config.d/df-austin.bak.20260628232757"),
+        home.path()
+            .join(".ssh/config.d/df-austin.bak.20260628232757"),
         "Host dcaustin-pfsense\n    HostName 10.20.0.1\n",
     )
     .unwrap();

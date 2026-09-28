@@ -1134,7 +1134,7 @@ impl App {
             KeyCode::PageDown => form.jump_group(true),
             KeyCode::PageUp => form.jump_group(false),
             KeyCode::Home => form.focus = 0,
-            KeyCode::End => form.focus = form.rows.len() - 1,
+            KeyCode::End => form.last(),
             KeyCode::Right => form.cycle(true),
             KeyCode::Left => form.cycle(false),
             KeyCode::Char(' ') => form.space(),
@@ -1153,7 +1153,7 @@ impl App {
                     self.msg = Some(Msg::Info("No changes.".into()));
                     return;
                 }
-                let name = form.host.clone();
+                let name = form.draft.host.clone();
                 if let Err(e) = self.run_op(Op::Settings { name, changes }, false) {
                     form.error = Some(e);
                     if matches!(self.mode, Mode::Normal) {
@@ -1946,7 +1946,7 @@ impl App {
         let room = height.saturating_sub(4) as usize;
         let mut lines: Vec<(Line, bool)> = Vec::new();
         let mut group = None;
-        for (i, r) in form.rows.iter().enumerate() {
+        for (i, r) in form.draft.rows.iter().enumerate() {
             if group != Some(r.spec.group) {
                 group = Some(r.spec.group);
                 lines.push((
@@ -2004,7 +2004,8 @@ impl App {
         )));
         frame.render_widget(Clear, rect);
         frame.render_widget(
-            Paragraph::new(shown).block(self.pane_block(format!("Settings {}", form.host), true)),
+            Paragraph::new(shown)
+                .block(self.pane_block(format!("Settings {}", form.draft.host), true)),
             rect,
         );
     }

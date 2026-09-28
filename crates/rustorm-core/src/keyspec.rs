@@ -330,3 +330,151 @@ impl SettingChange {
         }
     }
 }
+
+/// One value line of a settings form. A multi-valued key has one row per
+/// value plus one empty row to add another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingRow {
+    /// The keyword.
+    pub spec: KeySpec,
+    /// The value as edited; empty means the key is not set.
+    pub value: String,
+    /// The value as loaded.
+    pub original: String,
+    /// What `Host *` gives the host for this key, shown while unset.
+    pub inherited: Option<String>,
+}
+
+impl SettingRow {
+    /// True when the value differs from the loaded one.
+    pub fn changed(&self) -> bool {
+        self.value.trim() != self.original.trim()
+    }
+
+    /// The words a flag or choice offers, in order; `None` for typed kinds.
+    pub fn choices(&self) -> Option<&'static [&'static str]> {
+        match self.spec.kind {
+            KeyType::Flag => Some(YES_NO),
+            KeyType::Choice { values, .. } => Some(values),
+            _ => None,
+        }
+    }
+
+    /// True when the value is typed; a flag or a closed choice is only
+    /// picked.
+    pub fn typed(&self) -> bool {
+        !matches!(
+            self.spec.kind,
+            KeyType::Flag | KeyType::Choice { open: false, .. }
+        )
+    }
+
+    /// Why the value does not fit its keyword; `None` when it does or is
+    /// empty.
+    pub fn problem(&self) -> Option<String> {
+        let v = self.value.trim();
+        if v.is_empty() {
+            return None;
+        }
+        validate_setting(self.spec.key, v).err()
+    }
+}
+
+/// Every keyword a host can set, as rows grouped in [`KeyGroup::ALL`]
+/// order, with the changes to write once edited. The TUI and GUI settings
+/// forms edit one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsDraft {
+    /// The host's primary name.
+    pub host: String,
+    /// The rows.
+    pub rows: Vec<SettingRow>,
+}
+
+impl SettingsDraft {
+    /// The rows for `block`, with `defaults` (the `Host *` block) giving the
+    /// inherited values.
+    pub fn new(
+        host: &str,
+        block: &crate::HostBlock,
+        defaults: Option<&crate::HostBlock>,
+    ) -> SettingsDraft {
+        let mut rows = Vec::new();
+        for group in KeyGroup::ALL {
+            for spec in key_specs().into_iter().filter(|s| s.group == group) {
+                let inherited = defaults.and_then(|d| d.get(spec.key));
+                let row = |v: String| SettingRow {
+                    spec,
+                    value: v.clone(),
+                    original: v,
+                    inherited: inherited.clone(),
+                };
+                let values = block.get_all(spec.key);
+                if spec.multi {
+                    rows.extend(values.into_iter().map(row));
+                    rows.push(row(String::new()));
+                } else {
+                    rows.push(row(values.into_iter().next().unwrap_or_default()));
+                }
+            }
+        }
+        SettingsDraft {
+            host: host.to_string(),
+            rows,
+        }
+    }
+
+    /// The changes to write, one per keyword whose values differ from the
+    /// loaded ones; `Err` names the first value that does not fit its key.
+    pub fn changes(&self) -> std::result::Result<Vec<SettingChange>, String> {
+        let mut keys: Vec<&'static str> = Vec::new();
+        for r in &self.rows {
+            if !keys.contains(&r.spec.key) {
+                keys.push(r.spec.key);
+            }
+        }
+        let mut out = Vec::new();
+        for key in keys {
+            let rows = self.rows.iter().filter(|r| r.spec.key == key);
+            let values: Vec<String> = rows
+                .clone()
+                .map(|r| r.value.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .collect();
+            let original: Vec<String> = rows
+                .map(|r| r.original.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .collect();
+            if values == original {
+                continue;
+            }
+            for v in &values {
+                validate_setting(key, v).map_err(|reason| format!("{key} {reason}."))?;
+            }
+            out.push(SettingChange {
+                key: key.to_string(),
+                values,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Once the last row of a multi-valued key holds a value, adds an empty
+    /// row after it, so another value can always be added. `i` is any row
+    /// of the key.
+    pub fn grow(&mut self, i: usize) {
+        let spec = self.rows[i].spec;
+        if !spec.multi {
+            return;
+        }
+        let Some(last) = self.rows.iter().rposition(|r| r.spec.key == spec.key) else {
+            return;
+        };
+        if !self.rows[last].value.trim().is_empty() {
+            let mut blank = self.rows[last].clone();
+            blank.value.clear();
+            blank.original.clear();
+            self.rows.insert(last + 1, blank);
+        }
+    }
+}
