@@ -7,11 +7,13 @@ use egui::{
     ViewportCommand,
 };
 use egui_extras::{Column as TableColumn, TableBuilder};
-use rustorm_core::{backup_path, Config, ConfigFile, Env, SectionSummary, WriteOptions};
+use rustorm_core::{
+    Config, Env, FileState, SectionSummary, Workspace, WorkspaceSection, WriteOptions,
+};
 
 use crate::highlight::highlight_job;
 use crate::ops::{host_text, Op};
-use crate::rows::{rows, sort_rows, Column, Filters, HostRow, SortDir};
+use crate::rows::{sort_rows, workspace_rows, Column, Filters, HostRow, SortDir};
 
 /// The label of the button that closes without saving: "Don't Save" on
 /// macOS, "Discard" elsewhere.
@@ -19,6 +21,14 @@ pub const DISCARD_LABEL: &str = if cfg!(target_os = "macos") {
     "Don't Save"
 } else {
     "Discard"
+};
+
+/// The button that closes without saving several files: "Don't Save" on
+/// macOS, "Discard All" elsewhere.
+pub const DISCARD_ALL_LABEL: &str = if cfg!(target_os = "macos") {
+    "Don't Save"
+} else {
+    "Discard All"
 };
 
 const SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
@@ -141,17 +151,29 @@ pub enum Dialog {
     Conflict(Op),
     /// The file changed on disk while the editor holds unsaved text.
     EditorConflict,
-    /// Close requested with unsaved editor text.
+    /// Close requested with unsaved editor text in one file.
     UnsavedClose,
+    /// Close requested with unsaved editor text in several files; each
+    /// entry is a file's `~/` path.
+    UnsavedCloseAll(Vec<String>),
 }
 
 /// The rustorm desktop app. Build it with [`App::new`] from a config path
 /// and run it with eframe, or drive [`App::show`] from any `egui::Ui`.
 pub struct App {
-    file: ConfigFile,
+    ws: Workspace,
     env: Env,
     rows: Vec<HostRow>,
     sections: Vec<SectionSummary>,
+    file_sections: Vec<WorkspaceSection>,
+    /// One editor buffer per file of the workspace.
+    buffers: Vec<String>,
+    /// The file the editor, title and status bar show.
+    current: usize,
+    /// A Host line to put the editor's cursor on at the next frame.
+    goto_line: Option<usize>,
+    /// The Host line the editor was last opened at.
+    editor_line: Option<usize>,
     /// The selected tab.
     pub tab: Tab,
     /// The sorted column and direction; `None` keeps the file order.
@@ -161,7 +183,6 @@ pub struct App {
     selected: Option<String>,
     form: Option<Form>,
     dialog: Option<Dialog>,
-    editor_text: String,
     editor_error: Option<String>,
     status: String,
     last_backup: Option<PathBuf>,
@@ -173,21 +194,27 @@ pub struct App {
 }
 
 impl App {
-    /// Loads `path` (a missing file opens empty and is not created) with
-    /// the process's `$USER` and home directory.
+    /// Loads `path` (a missing file opens empty and is not created) and
+    /// every file its `Include` lines load, with the process's `$USER` and
+    /// home directory.
     pub fn new(path: impl Into<PathBuf>) -> anyhow::Result<App> {
         App::with_env(path, Env::from_process())
     }
 
-    /// Like [`App::new`] with an explicit environment.
+    /// Like [`App::new`] with an explicit environment; `env.home` also
+    /// resolves `~/` and relative `Include` patterns.
     pub fn with_env(path: impl Into<PathBuf>, env: Env) -> anyhow::Result<App> {
-        let file = ConfigFile::load(path.into())?;
+        let ws = Workspace::load_with_home(path.into(), env.home.as_deref())?;
         let mut app = App {
-            editor_text: file.original.clone(),
-            file,
+            buffers: ws.files.iter().map(|f| f.original.clone()).collect(),
+            ws,
             env,
             rows: Vec::new(),
             sections: Vec::new(),
+            file_sections: Vec::new(),
+            current: 0,
+            goto_line: None,
+            editor_line: None,
             tab: Tab::Hosts,
             sort: None,
             filters: Filters::default(),
@@ -209,9 +236,71 @@ impl App {
 
     // ----- state the UI and tests read -------------------------------------
 
-    /// The config file path.
+    /// The root config file path.
     pub fn path(&self) -> &Path {
-        &self.file.path
+        &self.ws.files[0].path
+    }
+
+    /// The workspace: the root and every file its `Include` lines load.
+    pub fn workspace(&self) -> &Workspace {
+        &self.ws
+    }
+
+    /// True when the workspace has several files, so the Files list, the
+    /// editor's file selector and the file column show.
+    pub fn is_multi(&self) -> bool {
+        self.ws.is_multi()
+    }
+
+    /// The file the editor shows, an index into the workspace's files.
+    pub fn current_file(&self) -> usize {
+        self.current
+    }
+
+    /// Shows file `i` in the editor, keeping every buffer's text.
+    pub fn select_file(&mut self, i: usize) {
+        if i < self.buffers.len() {
+            self.current = i;
+            self.editor_error = None;
+        }
+    }
+
+    /// True when file `i`'s buffer differs from the file as last loaded.
+    pub fn file_dirty(&self, i: usize) -> bool {
+        self.buffers
+            .get(i)
+            .is_some_and(|b| *b != self.ws.files[i].original)
+    }
+
+    /// Indices of the files with unsaved editor text, in load order.
+    pub fn dirty_files(&self) -> Vec<usize> {
+        self.load_indices()
+            .into_iter()
+            .filter(|&i| self.file_dirty(i))
+            .collect()
+    }
+
+    /// The editor buffer of file `i`.
+    pub fn buffer(&self, i: usize) -> &str {
+        &self.buffers[i]
+    }
+
+    /// The 1-based Host line the editor was last opened at by
+    /// [`App::open_in_editor`].
+    pub fn editor_line(&self) -> Option<usize> {
+        self.editor_line
+    }
+
+    /// The loaded files' indices in load order.
+    fn load_indices(&self) -> Vec<usize> {
+        self.ws
+            .load_order
+            .iter()
+            .filter_map(|e| match e.state {
+                FileState::Loaded(i) => Some(i),
+                FileState::Unreadable(_) => None,
+            })
+            .collect()
     }
 
     /// Every host row in file order.
@@ -258,14 +347,14 @@ impl App {
         self.dialog.as_ref()
     }
 
-    /// The editor buffer.
+    /// The editor buffer of the selected file.
     pub fn editor_text(&self) -> &str {
-        &self.editor_text
+        &self.buffers[self.current]
     }
 
-    /// Replaces the editor buffer, as typing would.
+    /// Replaces the selected file's editor buffer, as typing would.
     pub fn set_editor_text(&mut self, text: impl Into<String>) {
-        self.editor_text = text.into();
+        self.buffers[self.current] = text.into();
     }
 
     /// The editor's last refusal ("line N: cannot parse: …").
@@ -273,9 +362,10 @@ impl App {
         self.editor_error.as_deref()
     }
 
-    /// True when the editor buffer differs from the file as last loaded.
+    /// True when any file's editor buffer differs from the file as last
+    /// loaded.
     pub fn editor_dirty(&self) -> bool {
-        self.editor_text != self.file.original
+        (0..self.buffers.len()).any(|i| self.file_dirty(i))
     }
 
     /// The status-bar message of the last operation.
@@ -288,11 +378,18 @@ impl App {
         self.last_backup.as_deref()
     }
 
-    /// The window title.
+    /// The window title: `rustorm — <root>`, plus `— <selected file>` on
+    /// a workspace of several files, and ` •` while any file has unsaved
+    /// editor text.
     pub fn title(&self) -> String {
+        let file = if self.is_multi() {
+            format!(" — {}", self.ws.display(self.current))
+        } else {
+            String::new()
+        };
         format!(
-            "rustorm — {}{}",
-            self.file.path.display(),
+            "rustorm — {}{file}{}",
+            self.path().display(),
             if self.editor_dirty() { " •" } else { "" }
         )
     }
@@ -310,31 +407,82 @@ impl App {
     // ----- actions -----------------------------------------------------------
 
     fn refresh(&mut self) {
-        self.rows = rows(&self.file.config, &self.env);
-        self.sections = self.file.config.sections();
+        self.rows = workspace_rows(&self.ws, &self.env);
+        self.file_sections = self.ws.sections();
+        self.sections = self.file_sections.iter().map(|s| s.summary()).collect();
         if let Some(sel) = &self.selected {
             if !self.rows.iter().any(|r| &r.name == sel) {
                 self.selected = None;
             }
         }
+        if self.filters.file.is_some_and(|f| f >= self.ws.files.len()) {
+            self.filters.file = None;
+        }
     }
 
-    fn disk_text(&self) -> std::io::Result<String> {
-        match std::fs::read_to_string(&self.file.path) {
+    /// Replaces the workspace with `fresh`, matching files by path: a
+    /// buffer with unsaved text keeps it, every other buffer takes the
+    /// file's new text, and the selected file stays selected.
+    fn adopt(&mut self, fresh: Workspace) {
+        let old: Vec<(PathBuf, bool, String)> = self
+            .ws
+            .files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.path.clone(), self.file_dirty(i), self.buffers[i].clone()))
+            .collect();
+        let current = self.ws.files[self.current].path.clone();
+        let filter_file = self.filters.file.map(|i| self.ws.files[i].path.clone());
+        let section_file = self
+            .filters
+            .section_file
+            .map(|i| self.ws.files[i].path.clone());
+        let index_of = |ws: &Workspace, p: &Path| ws.files.iter().position(|f| f.path == p);
+        self.buffers = fresh
+            .files
+            .iter()
+            .map(|f| match old.iter().find(|(p, _, _)| *p == f.path) {
+                Some((_, true, text)) => text.clone(),
+                _ => f.original.clone(),
+            })
+            .collect();
+        self.current = index_of(&fresh, &current).unwrap_or(0);
+        self.filters.file = filter_file.and_then(|p| index_of(&fresh, &p));
+        self.filters.section_file = section_file.and_then(|p| index_of(&fresh, &p));
+        self.ws = fresh;
+    }
+
+    fn load_fresh(&self) -> rustorm_core::Result<Workspace> {
+        Workspace::load_with_home(self.ws.files[0].path.clone(), self.env.home.as_deref())
+    }
+
+    /// After a write to one file: when its `Include` lines changed the set
+    /// of files, the workspace reloads so the new set shows.
+    fn follow_includes(&mut self) {
+        if let Ok(fresh) = self.load_fresh() {
+            let paths = |ws: &Workspace| -> Vec<PathBuf> {
+                ws.load_order.iter().map(|e| e.path.clone()).collect()
+            };
+            if paths(&fresh) != paths(&self.ws) {
+                self.adopt(fresh);
+            }
+        }
+    }
+
+    fn disk_text(path: &Path) -> std::io::Result<String> {
+        match std::fs::read_to_string(path) {
             Ok(t) => Ok(t),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
             Err(e) => Err(e),
         }
     }
 
-    fn after_write(&mut self, existed: bool) {
-        let backup = backup_path(&self.file.path);
+    /// Records the backup of file `i` when the write made one.
+    fn note_backup(&mut self, i: usize, existed: bool) {
+        let backup = self.ws.backup_path_for(i);
         if existed && backup.exists() {
             self.last_backup = Some(backup);
         }
-        self.editor_text = self.file.original.clone();
-        self.editor_error = None;
-        self.refresh();
     }
 
     /// Selects `name` and opens it in the detail form.
@@ -350,8 +498,23 @@ impl App {
         self.tab = Tab::Hosts;
     }
 
-    /// Runs `op` through the core and writes the file, reloading first when
-    /// the file changed on disk. Returns true when the file was written.
+    /// Opens the host `name` in the editor: selects the file that holds it
+    /// and puts the cursor on its `Host` line. False when no file holds it.
+    pub fn open_in_editor(&mut self, name: &str) -> bool {
+        let Some(wl) = self.ws.find_host(name) else {
+            return false;
+        };
+        let line = self.ws.host_line(wl);
+        self.select_file(wl.file);
+        self.tab = Tab::Editor;
+        self.goto_line = Some(line);
+        self.editor_line = Some(line);
+        true
+    }
+
+    /// Runs `op` through the core and writes the files it changed,
+    /// reloading first when a file changed on disk. Returns true when the
+    /// write happened.
     pub fn run(&mut self, op: Op) -> bool {
         self.run_op(op, false)
     }
@@ -370,55 +533,85 @@ impl App {
         self.status = format!("error: {message}");
     }
 
-    fn run_op(&mut self, op: Op, force: bool) -> bool {
-        let disk = match self.disk_text() {
-            Ok(t) => t,
-            Err(e) => {
-                self.fail(format!("cannot read {}: {e}", self.file.path.display()));
-                return false;
-            }
-        };
-        if disk != self.file.original {
-            let fresh = match ConfigFile::load(self.file.path.clone()) {
-                Ok(f) => f,
-                Err(e) => {
-                    self.fail(e.to_string());
-                    return false;
-                }
-            };
-            let conflict = !force
-                && op
-                    .hosts()
-                    .iter()
-                    .any(|n| host_text(&self.file.config, n) != host_text(&fresh.config, n));
-            let editor_clean = !self.editor_dirty();
-            self.file = fresh;
-            if editor_clean {
-                self.editor_text = self.file.original.clone();
-            }
-            self.refresh();
-            self.status = "reloaded: the file changed on disk.".to_string();
-            if conflict {
-                self.dialog = Some(Dialog::Conflict(op));
-                return false;
+    /// The first loaded file whose disk text differs from what the app
+    /// last loaded; `Err` names a file that cannot be read.
+    fn changed_on_disk(&self) -> Result<bool, String> {
+        for f in &self.ws.files {
+            match App::disk_text(&f.path) {
+                Ok(t) if t != f.original => return Ok(true),
+                Ok(_) => {}
+                Err(e) => return Err(format!("cannot read {}: {e}", f.path.display())),
             }
         }
-        let mut config = self.file.config.clone();
-        let outcome = match op.apply(&mut config, &self.env) {
+        Ok(false)
+    }
+
+    fn run_op(&mut self, op: Op, force: bool) -> bool {
+        match self.changed_on_disk() {
+            Err(e) => {
+                self.fail(e);
+                return false;
+            }
+            Ok(true) => {
+                let fresh = match self.load_fresh() {
+                    Ok(w) => w,
+                    Err(e) => {
+                        self.fail(e.to_string());
+                        return false;
+                    }
+                };
+                let conflict = !force
+                    && op
+                        .hosts()
+                        .iter()
+                        .any(|n| host_text(&self.ws, n) != host_text(&fresh, n));
+                self.adopt(fresh);
+                self.refresh();
+                self.status = "reloaded: the file changed on disk.".to_string();
+                if conflict {
+                    self.dialog = Some(Dialog::Conflict(op));
+                    return false;
+                }
+            }
+            Ok(false) => {}
+        }
+        let mut ws = self.ws.clone();
+        let outcome = match op.apply(&mut ws, &self.env) {
             Ok(o) => o,
             Err(e) => {
                 self.fail(e.to_string());
                 return false;
             }
         };
-        let existed = self.file.existed;
-        let previous = std::mem::replace(&mut self.file.config, config);
-        if let Err(e) = self.file.save(WriteOptions::default()) {
-            self.file.config = previous;
-            self.fail(e.to_string());
-            return false;
+        let existed: Vec<bool> = self.ws.files.iter().map(|f| f.existed).collect();
+        let previous = std::mem::replace(&mut self.ws, ws);
+        let written = match self.ws.save(WriteOptions::default()) {
+            Ok(w) => w,
+            Err(e) => {
+                self.ws = previous;
+                self.fail(e.to_string());
+                return false;
+            }
+        };
+        let old_paths: Vec<PathBuf> = previous.files.iter().map(|f| f.path.clone()).collect();
+        let clean: Vec<bool> = (0..previous.files.len())
+            .map(|i| self.buffers[i] == previous.files[i].original)
+            .collect();
+        self.buffers = self
+            .ws
+            .files
+            .iter()
+            .map(|f| match old_paths.iter().position(|p| *p == f.path) {
+                Some(j) if !clean[j] => self.buffers[j].clone(),
+                _ => f.original.clone(),
+            })
+            .collect();
+        for &i in &written {
+            self.note_backup(i, existed.get(i).copied().unwrap_or(false));
         }
-        self.after_write(existed);
+        self.editor_error = None;
+        self.follow_includes();
+        self.refresh();
         self.status = outcome.message;
         self.dialog = None;
         match outcome.select {
@@ -440,65 +633,90 @@ impl App {
         }
     }
 
-    /// Saves the editor buffer through the core. Refuses an unparsable
-    /// line with its number; asks before replacing a file changed on disk.
+    /// Saves the selected file's editor buffer through the core, after its
+    /// own backup. Refuses an unparsable line with its number; asks before
+    /// replacing a file changed on disk. Other files are not written.
     pub fn save_editor(&mut self) -> bool {
         self.save_editor_inner(false)
     }
 
     fn save_editor_inner(&mut self, force: bool) -> bool {
-        let config = match Config::parse(&self.editor_text) {
+        let i = self.current;
+        let config = match Config::parse(&self.buffers[i]) {
             Ok(c) => c,
             Err(e) => {
                 self.editor_error = Some(e.to_string());
                 return false;
             }
         };
-        if let Some((i, line)) = config.lines().enumerate().find(|(_, l)| l.is_unparsable()) {
-            let message = format!("line {}: cannot parse: {}", i + 1, line.text().trim());
+        if let Some((n, line)) = config.lines().enumerate().find(|(_, l)| l.is_unparsable()) {
+            let message = format!("line {}: cannot parse: {}", n + 1, line.text().trim());
             self.status = format!("error: {message}");
             self.editor_error = Some(message);
             return false;
         }
-        match self.disk_text() {
-            Ok(disk) if disk != self.file.original && !force => {
+        let path = self.ws.files[i].path.clone();
+        match App::disk_text(&path) {
+            Ok(disk) if disk != self.ws.files[i].original && !force => {
                 self.dialog = Some(Dialog::EditorConflict);
                 return false;
             }
             Ok(_) => {}
             Err(e) => {
-                self.editor_error = Some(format!("cannot read {}: {e}", self.file.path.display()));
+                self.editor_error = Some(format!("cannot read {}: {e}", path.display()));
                 return false;
             }
         }
         let mut config = config;
         config.sort_sections();
         let text = config.render();
-        let existed = self.file.existed;
-        if let Err(e) = self.file.save_text(&text, WriteOptions::default()) {
+        let existed = self.ws.files[i].existed;
+        if let Err(e) = self.ws.save_text(i, &text, WriteOptions::default()) {
             self.editor_error = Some(e.to_string());
             return false;
         }
-        self.after_write(existed);
-        self.status = "saved.".to_string();
+        self.buffers[i] = self.ws.files[i].original.clone();
+        self.note_backup(i, existed);
+        self.editor_error = None;
+        self.follow_includes();
+        self.refresh();
+        self.status = if self.is_multi() {
+            format!("saved {}.", self.ws.display(self.current))
+        } else {
+            "saved.".to_string()
+        };
         if let Some(sel) = self.selected.clone() {
             self.select(&sel);
         }
         true
     }
 
-    /// Restores the editor buffer from the file on disk.
+    /// Restores the selected file's editor buffer from the file on disk.
     pub fn discard_editor(&mut self) {
-        match ConfigFile::load(self.file.path.clone()) {
-            Ok(f) => {
-                self.file = f;
-                self.editor_text = self.file.original.clone();
+        let i = self.current;
+        match self.ws.reload_file(i) {
+            Ok(()) => {
+                self.buffers[i] = self.ws.files[i].original.clone();
                 self.editor_error = None;
+                self.follow_includes();
                 self.refresh();
                 self.status = "changes discarded.".to_string();
             }
             Err(e) => self.status = format!("error: {e}"),
         }
+    }
+
+    /// Saves every file with unsaved editor text, in load order. Stops at
+    /// the first refused save with that file selected on the Editor tab.
+    fn save_all(&mut self) -> bool {
+        for i in self.dirty_files() {
+            self.current = i;
+            if !self.save_editor_inner(false) {
+                self.tab = Tab::Editor;
+                return false;
+            }
+        }
+        true
     }
 
     // ----- drawing -------------------------------------------------------------
@@ -540,9 +758,16 @@ impl App {
         if !requested {
             return;
         }
-        if self.editor_dirty() && !self.allow_close {
+        let dirty = self.dirty_files();
+        if !dirty.is_empty() && !self.allow_close {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            self.dialog = Some(Dialog::UnsavedClose);
+            if dirty.len() == 1 {
+                self.current = dirty[0];
+                self.dialog = Some(Dialog::UnsavedClose);
+            } else {
+                let names = dirty.iter().map(|&i| self.ws.display(i)).collect();
+                self.dialog = Some(Dialog::UnsavedCloseAll(names));
+            }
         } else {
             self.close_now(ctx);
         }
@@ -622,14 +847,15 @@ impl App {
                         }
                     }
                 }
+                let current_dirty = self.file_dirty(self.current);
                 if ui
-                    .add_enabled(self.editor_dirty(), Button::new("Discard Changes"))
+                    .add_enabled(current_dirty, Button::new("Discard Changes"))
                     .clicked()
                 {
                     self.discard_editor();
                 }
                 if ui
-                    .add_enabled(!self.editor_dirty(), Button::new("Reload from Disk"))
+                    .add_enabled(!current_dirty, Button::new("Reload from Disk"))
                     .clicked()
                 {
                     self.discard_editor();
@@ -681,19 +907,34 @@ impl App {
     }
 
     fn status_bar(&mut self, ui: &mut Ui) {
+        let multi = self.is_multi();
         ui.horizontal(|ui| {
-            ui.label(self.file.path.display().to_string());
+            if multi {
+                ui.label(self.ws.display(self.current));
+            } else {
+                ui.label(self.path().display().to_string());
+            }
             ui.separator();
-            if self.editor_dirty() {
+            if self.file_dirty(self.current) {
                 ui.label(RichText::new("● unsaved changes").color(ui.visuals().warn_fg_color));
+            } else if self.editor_dirty() {
+                ui.label(
+                    RichText::new("● unsaved changes in other files")
+                        .color(ui.visuals().warn_fg_color),
+                );
             } else {
                 ui.label("saved");
             }
             ui.separator();
-            match &self.last_backup {
-                Some(b) => ui.label(format!("last backup: {}", b.display())),
-                None => ui.label("no backup yet"),
-            };
+            if multi {
+                let backup = self.ws.backup_path_for(self.current);
+                ui.label(format!("backup: {}", self.ws.display_path(&backup)));
+            } else {
+                match &self.last_backup {
+                    Some(b) => ui.label(format!("last backup: {}", b.display())),
+                    None => ui.label("no backup yet"),
+                };
+            }
             if !self.status.is_empty() {
                 ui.separator();
                 if self.status.starts_with("error:") {
@@ -706,26 +947,70 @@ impl App {
     }
 
     fn sidebar(&mut self, ui: &mut Ui) {
+        let multi = self.is_multi();
         ui.heading("Sections");
         let total = self.rows.len();
         if ui
             .selectable_label(
-                self.filters.sidebar.is_none(),
+                self.filters.sidebar.is_none() && self.filters.file.is_none(),
                 format!("All hosts  {total}"),
             )
             .clicked()
         {
             self.filters.sidebar = None;
+            self.filters.section_file = None;
+            self.filters.file = None;
         }
-        for s in self.sections.clone() {
-            let selected = self.filters.sidebar.as_deref() == Some(s.name.as_str());
+        let weak = ui.visuals().weak_text_color();
+        for s in self.file_sections.clone() {
+            let file = multi.then_some(s.index);
+            let selected = self.filters.sidebar.as_deref() == Some(s.name.as_str())
+                && self.filters.section_file == file;
             let text = if s.catch_all {
                 format!("{}  {}  (catch-all)", s.name, s.hosts)
             } else {
                 format!("{}  {}", s.name, s.hosts)
             };
-            if ui.selectable_label(selected, text).clicked() {
-                self.filters.sidebar = if selected { None } else { Some(s.name.clone()) };
+            let shared = multi
+                && self
+                    .file_sections
+                    .iter()
+                    .any(|o| o.index != s.index && o.name.eq_ignore_ascii_case(&s.name));
+            let label: egui::WidgetText = if shared {
+                let mut job = egui::text::LayoutJob::default();
+                let style = ui.style().clone();
+                RichText::new(text).append_to(
+                    &mut job,
+                    &style,
+                    egui::FontSelection::Default,
+                    egui::Align::Center,
+                );
+                RichText::new(format!("  {}", self.ws.file_name(s.index)))
+                    .color(weak)
+                    .append_to(
+                        &mut job,
+                        &style,
+                        egui::FontSelection::Default,
+                        egui::Align::Center,
+                    );
+                job.into()
+            } else {
+                text.into()
+            };
+            let resp = ui.selectable_label(selected, label);
+            let resp = if multi {
+                resp.on_hover_text(self.ws.display(s.index))
+            } else {
+                resp
+            };
+            if resp.clicked() {
+                if selected {
+                    self.filters.sidebar = None;
+                    self.filters.section_file = None;
+                } else {
+                    self.filters.sidebar = Some(s.name.clone());
+                    self.filters.section_file = file;
+                }
             }
         }
         ui.add_space(6.0);
@@ -736,6 +1021,53 @@ impl App {
             self.dialog = Some(Dialog::AddSection {
                 name: String::new(),
                 error: None,
+            });
+        }
+        if multi {
+            ui.add_space(10.0);
+            ui.heading("Files");
+            self.files_list(ui);
+        }
+    }
+
+    /// The sidebar's Files list: every file in load order with its host
+    /// count and `•` while it has unsaved editor text.
+    fn files_list(&mut self, ui: &mut Ui) {
+        let weak = ui.visuals().weak_text_color();
+        for entry in self.ws.load_order.clone() {
+            let indent = 12.0 * entry.depth as f32;
+            let name = entry
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            ui.horizontal(|ui| {
+                ui.add_space(indent);
+                match entry.state {
+                    FileState::Loaded(i) => {
+                        let hosts = self.ws.files[i].config.host_count();
+                        let dot = if self.file_dirty(i) { "  •" } else { "" };
+                        let selected = self.filters.file == Some(i);
+                        let resp = ui
+                            .selectable_label(selected, format!("{name}  {hosts}{dot}"))
+                            .on_hover_text(self.ws.display(i));
+                        if resp.clicked() {
+                            if selected {
+                                self.filters.file = None;
+                            } else {
+                                self.filters.file = Some(i);
+                                self.select_file(i);
+                            }
+                        }
+                    }
+                    FileState::Unreadable(reason) => {
+                        ui.label(RichText::new(format!("{name}  cannot read")).color(weak))
+                            .on_hover_text(format!(
+                                "{} ({reason})",
+                                self.ws.display_path(&entry.path)
+                            ));
+                    }
+                }
             });
         }
     }
@@ -780,14 +1112,18 @@ impl App {
         let sort = self.sort;
         let filters = &mut self.filters;
         let selected = self.selected.clone();
+        let columns = Column::shown(self.ws.is_multi());
         TableBuilder::new(ui)
             .id_salt("hosts")
             .striped(true)
             .sense(Sense::click())
-            .columns(TableColumn::auto().at_least(70.0).resizable(true), 6)
+            .columns(
+                TableColumn::auto().at_least(70.0).resizable(true),
+                columns.len() - 1,
+            )
             .column(TableColumn::remainder().at_least(80.0))
             .header(50.0, |mut header| {
-                for column in Column::ALL {
+                for &column in columns {
                     header.col(|ui| {
                         ui.vertical(|ui| {
                             let arrow = match sort {
@@ -817,7 +1153,7 @@ impl App {
                 for row in &visible {
                     body.row(22.0, |mut tr| {
                         tr.set_selected(selected.as_deref() == Some(row.name.as_str()));
-                        for column in Column::ALL {
+                        for &column in columns {
                             tr.col(|ui| {
                                 if column == Column::Host {
                                     ui.label(&row.name);
@@ -827,6 +1163,10 @@ impl App {
                                     return;
                                 }
                                 let text = row.display(column);
+                                if column == Column::File {
+                                    ui.label(text).on_hover_text(self.ws.display(row.file));
+                                    return;
+                                }
                                 if text.is_empty() {
                                     ui.label(RichText::new("—").color(weak));
                                 } else if row.inherited(column) {
@@ -876,7 +1216,8 @@ impl App {
 
     fn detail_panel(&mut self, ui: &mut Ui) {
         let blocked = self.editor_dirty();
-        let section_names: Vec<String> = self.sections.iter().map(|s| s.name.clone()).collect();
+        let multi = self.is_multi();
+        let section_names = self.section_names();
         let Some(form) = self.form.as_mut() else {
             return;
         };
@@ -924,9 +1265,16 @@ impl App {
         let mut delete = false;
         let mut clone = false;
         let mut move_to = false;
+        let mut show_in_editor = false;
         ui.horizontal(|ui| {
             save = ui.add_enabled(!blocked, Button::new("Save")).clicked();
             cancel = ui.button("Cancel").clicked();
+            if multi && !adding {
+                show_in_editor = ui
+                    .button("Show in Editor")
+                    .on_hover_text("Open the file that holds this host at its Host line")
+                    .clicked();
+            }
         });
         if !adding {
             ui.separator();
@@ -953,6 +1301,11 @@ impl App {
         if clone {
             self.open_clone();
         }
+        if show_in_editor {
+            if let Some(s) = self.selected.clone() {
+                self.open_in_editor(&s);
+            }
+        }
         if move_to {
             if let Some(s) = self.selected.clone() {
                 self.dialog = Some(Dialog::Move {
@@ -962,6 +1315,17 @@ impl App {
                 });
             }
         }
+    }
+
+    /// Every section name once, in load order, for the section buttons.
+    fn section_names(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for s in &self.sections {
+            if !out.iter().any(|o| o.eq_ignore_ascii_case(&s.name)) {
+                out.push(s.name.clone());
+            }
+        }
+        out
     }
 
     fn open_clone(&mut self) {
@@ -975,13 +1339,17 @@ impl App {
     }
 
     fn editor_tab(&mut self, ui: &mut Ui) {
-        let blocked_save = !self.editor_dirty();
+        let current_dirty = self.file_dirty(self.current);
         ui.horizontal(|ui| {
-            if ui.add_enabled(!blocked_save, Button::new("Save")).clicked() {
+            if self.is_multi() {
+                self.file_selector(ui);
+                ui.separator();
+            }
+            if ui.add_enabled(current_dirty, Button::new("Save")).clicked() {
                 self.save_editor();
             }
             if ui
-                .add_enabled(!blocked_save, Button::new("Discard Changes"))
+                .add_enabled(current_dirty, Button::new("Discard Changes"))
                 .clicked()
             {
                 self.discard_editor();
@@ -992,24 +1360,95 @@ impl App {
         });
         ui.separator();
         let dark = ui.visuals().dark_mode;
+        let font = FontId::monospace(13.0);
         let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
-            let mut job = highlight_job(buf.as_str(), dark, FontId::monospace(13.0));
+            let mut job = highlight_job(buf.as_str(), dark, font.clone());
             job.wrap.max_width = f32::INFINITY;
             ui.ctx().fonts_mut(|f| f.layout_job(job))
         };
-        egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-            let resp = ui.add(
-                TextEdit::multiline(&mut self.editor_text)
-                    .code_editor()
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(30)
-                    .layouter(&mut layouter),
-            );
-            set_label(ui, resp.id, "config editor");
-            if resp.changed() {
-                self.editor_error = None;
-            }
-        });
+        let goto = self.goto_line.take();
+        let current = self.current;
+        let salt = self.ws.files[current].path.clone();
+        let row_height = ui.fonts_mut(|f| f.row_height(&FontId::monospace(13.0)));
+        let buffer = &mut self.buffers[current];
+        let mut changed = false;
+        egui::ScrollArea::both()
+            .id_salt(("editor-scroll", &salt))
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                let resp = ui.add(
+                    TextEdit::multiline(buffer)
+                        .id_salt(("editor", &salt))
+                        .code_editor()
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(30)
+                        .layouter(&mut layouter),
+                );
+                set_label(ui, resp.id, "config editor");
+                changed = resp.changed();
+                if let Some(line) = goto {
+                    let char_index: usize = buffer
+                        .split_inclusive('\n')
+                        .take(line.saturating_sub(1))
+                        .map(|l| l.chars().count())
+                        .sum();
+                    let mut state = TextEdit::load_state(ui.ctx(), resp.id).unwrap_or_default();
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::one(
+                            egui::text::CCursor::new(char_index),
+                        )));
+                    TextEdit::store_state(ui.ctx(), resp.id, state);
+                    resp.request_focus();
+                    let top = resp.rect.top() + row_height * line.saturating_sub(1) as f32;
+                    let target = egui::Rect::from_min_size(
+                        egui::pos2(resp.rect.left(), top),
+                        egui::vec2(1.0, row_height),
+                    );
+                    ui.scroll_to_rect(target, Some(egui::Align::TOP));
+                }
+            });
+        if changed {
+            self.editor_error = None;
+        }
+    }
+
+    /// The popup above the editor that picks the file it shows: every file
+    /// in load order, `•` on each with unsaved text; unreadable files are
+    /// listed but cannot be picked.
+    fn file_selector(&mut self, ui: &mut Ui) {
+        let label = |app: &App, i: usize| {
+            let dot = if app.file_dirty(i) { " •" } else { "" };
+            format!("{}{dot}", app.ws.display(i))
+        };
+        let l = ui.label("File");
+        let mut picked = self.current;
+        let resp = egui::ComboBox::from_id_salt("editor-file")
+            .selected_text(label(self, self.current))
+            .width(320.0)
+            .show_ui(ui, |ui| {
+                for entry in &self.ws.load_order {
+                    match &entry.state {
+                        FileState::Loaded(i) => {
+                            ui.selectable_value(&mut picked, *i, label(self, *i));
+                        }
+                        FileState::Unreadable(_) => {
+                            ui.add_enabled(
+                                false,
+                                Button::selectable(
+                                    false,
+                                    format!("{}  cannot read", self.ws.display_path(&entry.path)),
+                                ),
+                            );
+                        }
+                    }
+                }
+            });
+        let resp = resp.response.labelled_by(l.id);
+        set_label(ui, resp.id, "editor file");
+        if picked != self.current {
+            self.select_file(picked);
+        }
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
@@ -1108,9 +1547,9 @@ impl App {
                     let l = ui.label("Section");
                     ui.text_edit_singleline(&mut section).labelled_by(l.id);
                     ui.horizontal_wrapped(|ui| {
-                        for s in &self.sections {
-                            if ui.small_button(&s.name).clicked() {
-                                section = s.name.clone();
+                        for s in self.section_names() {
+                            if ui.small_button(&s).clicked() {
+                                section = s;
                             }
                         }
                     });
@@ -1163,7 +1602,14 @@ impl App {
                     });
                 }
                 Dialog::UnsavedClose => {
-                    ui.heading("Save changes to the config file?");
+                    if self.is_multi() {
+                        ui.heading(format!(
+                            "Save changes to {}?",
+                            self.ws.display(self.current)
+                        ));
+                    } else {
+                        ui.heading("Save changes to the config file?");
+                    }
                     ui.label("The editor has unsaved changes.");
                     ui.horizontal(|ui| {
                         if ui.button("Cancel").clicked() {
@@ -1177,6 +1623,35 @@ impl App {
                         if ui.button("Save").clicked() {
                             self.dialog = None;
                             if self.save_editor() {
+                                self.close_now(ctx);
+                            }
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::UnsavedCloseAll(names) => {
+                    ui.heading(format!("Save changes to {} files?", names.len()));
+                    ui.label("These files have unsaved changes:");
+                    for n in &names {
+                        ui.label(RichText::new(format!("• {n}")).monospace());
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let cancel = ui.button("Cancel");
+                        if ui.memory(|m| m.focused().is_none()) {
+                            cancel.request_focus();
+                        }
+                        if cancel.clicked() {
+                            close = true;
+                        }
+                        if ui.button(DISCARD_ALL_LABEL).clicked() {
+                            self.dialog = None;
+                            self.close_now(ctx);
+                            close = true;
+                        }
+                        if ui.button("Save All").clicked() {
+                            self.dialog = None;
+                            if self.save_all() {
                                 self.close_now(ctx);
                             }
                             close = true;

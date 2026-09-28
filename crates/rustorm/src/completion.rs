@@ -25,7 +25,7 @@ _rustorm_with_hosts() {
     local cur="${COMP_WORDS[COMP_CWORD]}" cmd="" i
     for ((i = 1; i < COMP_CWORD; i++)); do
         case "${COMP_WORDS[i]}" in
-            -c|--config|-s|--section) ((i++)) ;;
+            -c|--config|-s|--section|-f|--file) ((i++)) ;;
             -*) ;;
             *) cmd="${COMP_WORDS[i]}"; break ;;
         esac

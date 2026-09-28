@@ -69,14 +69,14 @@ pub fn pair_up(args: &[String]) -> Result<Vec<(String, String)>> {
         .collect())
 }
 
-fn check_settable(key: &str) -> Result<()> {
+pub(crate) fn check_settable(key: &str) -> Result<()> {
     if key.eq_ignore_ascii_case("host") || key.eq_ignore_ascii_case("match") {
         return Err(Error::ForbiddenKey(key.to_string()));
     }
     Ok(())
 }
 
-fn apply_pairs(block: &mut HostBlock, pairs: &[(String, String)], append: bool) {
+pub(crate) fn apply_pairs(block: &mut HostBlock, pairs: &[(String, String)], append: bool) {
     for (k, v) in pairs {
         if append && keys::is_multi_valued(k) {
             block.append(k, v);
@@ -255,7 +255,7 @@ pub struct ListRow {
     pub proxy_jump: Option<String>,
 }
 
-fn serialize_options<S: serde::Serializer>(
+pub(crate) fn serialize_options<S: serde::Serializer>(
     options: &[(String, String)],
     serializer: S,
 ) -> std::result::Result<S::Ok, S::Error> {
@@ -356,6 +356,17 @@ pub enum ProblemKind {
     DuplicateName,
     /// A line that is neither blank, a comment nor a directive.
     UnparsableLine,
+    /// A host name defined in two or more workspace files.
+    DuplicateAcrossFiles,
+    /// An `Include` that loads a file whose name looks like a backup.
+    IncludeLoadsBackup,
+    /// An `Include` inside `Host *`, read as global.
+    IncludeInsideHostStar,
+    /// An `Include` inside another `Host` or a `Match` block; rustorm loads
+    /// it for every host.
+    IncludeInsideBlock,
+    /// An included file that cannot be read (D24).
+    IncludeUnreadable,
 }
 
 /// One problem `check` reports.
@@ -369,13 +380,24 @@ pub struct Problem {
     pub line: Option<usize>,
     /// The description without the host prefix.
     pub detail: String,
+    /// The absolute path of the file the problem is in (D23). Set by
+    /// [`crate::Workspace::check`]; `None` from [`Config::check`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
+    /// On a workspace of several files, the file as text output prints it,
+    /// shown before `line N` of an unparsable line.
+    #[serde(skip)]
+    pub file_label: Option<String>,
 }
 
 impl std::fmt::Display for Problem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (&self.host, self.line) {
             (Some(h), _) => write!(f, "{h}: {}", self.detail),
-            (None, Some(n)) => write!(f, "line {n}: {}", self.detail),
+            (None, Some(n)) => match &self.file_label {
+                Some(file) => write!(f, "{file} line {n}: {}", self.detail),
+                None => write!(f, "line {n}: {}", self.detail),
+            },
             (None, None) => write!(f, "{}", self.detail),
         }
     }
@@ -436,13 +458,33 @@ fn expand_identity(value: &str, home: Option<&std::path::Path>) -> Option<PathBu
     Some(base.join(rest))
 }
 
+/// The copy `clone` makes of `source`: its body under `Host NEW-NAME`,
+/// `HostName` rewritten unless `keep_hostname`, then the overrides.
+pub(crate) fn clone_block(source: &HostBlock, spec: &CloneSpec) -> HostBlock {
+    let mut block = HostBlock::new(std::slice::from_ref(&spec.new_name));
+    block.body = source.body.clone();
+    if !spec.keep_hostname {
+        if let Some(hn) = block.get("HostName") {
+            if hn.contains(&spec.source) {
+                block.set("HostName", &hn.replace(&spec.source, &spec.new_name));
+            }
+        }
+    }
+    apply_pairs(&mut block, &spec.overrides, false);
+    block.last_line_mut().ensure_terminated();
+    block
+}
+
 impl Config {
-    fn finish(&mut self) {
+    pub(crate) fn finish(&mut self) {
         self.sort_sections();
     }
 
-    fn resolve_user_port(&self, uri: &ConnectionUri, env: &Env) -> (String, u16) {
-        let defaults = self.defaults();
+    fn resolve_user_port(
+        uri: &ConnectionUri,
+        env: &Env,
+        defaults: Option<&HostBlock>,
+    ) -> (String, u16) {
         let user = uri
             .user
             .clone()
@@ -460,8 +502,7 @@ impl Config {
         (user, port)
     }
 
-    fn default_user_port(&self, env: &Env) -> (String, u16) {
-        let defaults = self.defaults();
+    fn default_user_port(env: &Env, defaults: Option<&HostBlock>) -> (String, u16) {
         let user = defaults
             .and_then(|d| d.get("User"))
             .or_else(|| env.user.clone())
@@ -478,7 +519,7 @@ impl Config {
         self.hosts().iter().filter(|h| !h.is_defaults()).count()
     }
 
-    fn place(
+    pub(crate) fn place(
         &mut self,
         block: HostBlock,
         section: Option<&str>,
@@ -503,6 +544,19 @@ impl Config {
     /// (created when missing), else the catch-all, else the end of an
     /// unsectioned file.
     pub fn add(&mut self, spec: &AddSpec, env: &Env) -> Result<Placed> {
+        let defaults = self.defaults().cloned();
+        self.add_with_defaults(spec, env, defaults.as_ref())
+    }
+
+    /// [`Config::add`] with user and port resolved through `defaults`
+    /// instead of this file's own `Host *` (a workspace passes the first
+    /// `Host *` in load order).
+    pub(crate) fn add_with_defaults(
+        &mut self,
+        spec: &AddSpec,
+        env: &Env,
+        defaults: Option<&HostBlock>,
+    ) -> Result<Placed> {
         validate_name(&spec.name)?;
         if self.find_host(&spec.name).is_some() {
             return Err(Error::HostExists(spec.name.clone()));
@@ -511,7 +565,7 @@ impl Config {
         for (k, _) in &spec.options {
             check_settable(k)?;
         }
-        let (user, port) = self.resolve_user_port(&uri, env);
+        let (user, port) = Config::resolve_user_port(&uri, env, defaults);
         let mut block = HostBlock::new(std::slice::from_ref(&spec.name));
         block.set("HostName", &uri.host);
         block.set("User", &user);
@@ -528,6 +582,17 @@ impl Config {
     /// from the URI, sets `IdentityFile` and the `-o` options, and moves the
     /// host to `spec.section` when given. Other keys stay.
     pub fn edit(&mut self, spec: &EditSpec, env: &Env) -> Result<Placed> {
+        let defaults = self.defaults().cloned();
+        self.edit_with_defaults(spec, env, defaults.as_ref())
+    }
+
+    /// [`Config::edit`] with user and port resolved through `defaults`.
+    pub(crate) fn edit_with_defaults(
+        &mut self,
+        spec: &EditSpec,
+        env: &Env,
+        defaults: Option<&HostBlock>,
+    ) -> Result<Placed> {
         let loc = self
             .find_host(&spec.name)
             .ok_or_else(|| Error::EditTargetMissing(spec.name.clone()))?;
@@ -535,7 +600,7 @@ impl Config {
         for (k, _) in &spec.options {
             check_settable(k)?;
         }
-        let (user, port) = self.resolve_user_port(&uri, env);
+        let (user, port) = Config::resolve_user_port(&uri, env, defaults);
         let block = self.host_mut(loc);
         block.set("HostName", &uri.host);
         block.set("User", &user);
@@ -556,7 +621,7 @@ impl Config {
         Ok(Placed { name, section })
     }
 
-    fn select(&self, selector: &HostSelector) -> Result<Vec<HostLocation>> {
+    pub(crate) fn select(&self, selector: &HostSelector) -> Result<Vec<HostLocation>> {
         match selector {
             HostSelector::Name(name) => self
                 .find_host(name)
@@ -636,18 +701,7 @@ impl Config {
         for (k, _) in &spec.overrides {
             check_settable(k)?;
         }
-        let source = self.host(loc).clone();
-        let mut block = HostBlock::new(std::slice::from_ref(&spec.new_name));
-        block.body = source.body.clone();
-        if !spec.keep_hostname {
-            if let Some(hn) = block.get("HostName") {
-                if hn.contains(&spec.source) {
-                    block.set("HostName", &hn.replace(&spec.source, &spec.new_name));
-                }
-            }
-        }
-        apply_pairs(&mut block, &spec.overrides, false);
-        block.last_line_mut().ensure_terminated();
+        let block = clone_block(self.host(loc), spec);
         self.ensure_trailing_newline();
         let fallback = loc.section;
         Ok(self.place(block, spec.section.as_deref(), fallback))
@@ -750,7 +804,16 @@ impl Config {
     /// order (preamble first, then each section) and sorted by name inside
     /// each part.
     pub fn list(&self, env: &Env) -> Vec<ListRow> {
-        let (default_user, default_port) = self.default_user_port(env);
+        self.list_with_defaults(env, self.defaults())
+    }
+
+    /// [`Config::list`] with user and port falling back to `defaults`.
+    pub(crate) fn list_with_defaults(
+        &self,
+        env: &Env,
+        defaults: Option<&HostBlock>,
+    ) -> Vec<ListRow> {
+        let (default_user, default_port) = Config::default_user_port(env, defaults);
         let parts = std::iter::once(None).chain((0..self.sections.len()).map(Some));
         let mut rows = Vec::new();
         for part in parts {
@@ -835,9 +898,12 @@ impl Config {
     /// expression, or literal text when `fixed`).
     pub fn search(&self, pattern: &str, fixed: bool, env: &Env) -> Result<Vec<ListRow>> {
         let matcher = Matcher::new(pattern, fixed)?;
-        let rows = self.list(env);
-        Ok(rows
-            .into_iter()
+        Ok(self.search_rows(&matcher, self.list(env)))
+    }
+
+    /// Keeps the rows of `rows` whose host matches `matcher`.
+    pub(crate) fn search_rows(&self, matcher: &Matcher, rows: Vec<ListRow>) -> Vec<ListRow> {
+        rows.into_iter()
             .filter(|row| {
                 let block = self.find_primary(&row.name).map(|l| self.host(l));
                 std::iter::once(row.name.clone())
@@ -852,7 +918,7 @@ impl Config {
                     )
                     .any(|s| matcher.is_match(&s))
             })
-            .collect())
+            .collect()
     }
 
     /// `alias`: adds names to a host's `Host` line. Names already on that
@@ -1053,6 +1119,8 @@ impl Config {
                         kind: ProblemKind::UnknownKey,
                         host: Some(name.clone()),
                         line: None,
+                        file: None,
+                        file_label: None,
                         detail: format!("unknown key {}", d.key),
                     });
                     continue;
@@ -1064,6 +1132,8 @@ impl Config {
                             kind: ProblemKind::DuplicateKey,
                             host: Some(name.clone()),
                             line: None,
+                            file: None,
+                            file_label: None,
                             detail: format!("duplicate key {}", keys::canonical_key(&d.key)),
                         });
                         reported.push(lower.clone());
@@ -1077,6 +1147,8 @@ impl Config {
                                 kind: ProblemKind::MissingIdentityFile,
                                 host: Some(name.clone()),
                                 line: None,
+                                file: None,
+                                file_label: None,
                                 detail: format!("IdentityFile {} does not exist", d.value),
                             });
                         }
@@ -1089,6 +1161,8 @@ impl Config {
                     kind: ProblemKind::MissingHostName,
                     host: Some(name.clone()),
                     line: None,
+                    file: None,
+                    file_label: None,
                     detail: "no HostName".to_string(),
                 });
             }
@@ -1107,6 +1181,8 @@ impl Config {
                 kind: ProblemKind::DuplicateName,
                 host: Some(n),
                 line: None,
+                file: None,
+                file_label: None,
                 detail: format!("name used by {c} entries"),
             });
         }
@@ -1116,6 +1192,8 @@ impl Config {
                     kind: ProblemKind::UnparsableLine,
                     host: None,
                     line: Some(i + 1),
+                    file: None,
+                    file_label: None,
                     detail: format!("cannot parse: {}", line.text().trim()),
                 });
             }

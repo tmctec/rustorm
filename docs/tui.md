@@ -49,7 +49,10 @@ The focused pane has a double border and a bracketed title; the selected row is 
 | `q` | table, sections | Quit. Asks first when the editor has unsaved edits. |
 | `Ctrl-C` | any | Quit, through the same unsaved-edits prompt. |
 | `?` | table, sections | Toggle the key overlay. `Esc` or `?` closes it. |
-| `Tab` / `Shift-Tab` | table, sections, editor | Cycle focus: sections, table, editor. |
+| `Tab` / `Shift-Tab` | table, sections, editor | Cycle focus: files (on a workspace of several files), sections, table, editor. |
+| `F` | table, sections | Focus the file list; only on a workspace of several files (see Files). |
+| `Enter` | files | Show that file in the editor and focus it. |
+| `Esc` | files | Return focus to the table. |
 | `↑` `↓` / `j` `k` | table, sections | Move the selection. |
 | `g` `G` / `Home` `End` | table, sections | First or last row. |
 | `1` … `7` | table | Sort by section, host, user, hostname, port, proxy, jump. The same key again flips the direction. |
@@ -65,8 +68,8 @@ The focused pane has a double border and a bracketed title; the selected row is 
 | `m` | table | Move or rename the selected host. |
 | `R` | sections | Rename the selected section. |
 | `n` | table, sections | Create an empty section. |
-| `o` | table | Open the editor at the selected host's `Host` line. |
-| `Ctrl-S` | editor | Save the buffer. |
+| `o` | table | Open the editor at the selected host's `Host` line, in the file that holds it. |
+| `Ctrl-S` | editor | Save the buffer of the file on screen. |
 | `Ctrl-R` | editor | Discard the buffer's edits and reload the file, after confirmation. |
 | `Esc` | editor | Return focus to the table; the buffer keeps its edits. |
 | `Tab` / `Shift-Tab` / `↑` `↓` | form | Next or previous field. |
@@ -160,3 +163,15 @@ The editor is a `tui-textarea` holding the file's text. It never soft-wraps; lon
 **Changed on disk.** When the file's modification time or size changed since the buffer was loaded, `Ctrl-S` asks `The file changed on disk. [r]eload (drop your edits) / [o]verwrite / [c]ancel`. `r` loads the disk text into the buffer, `o` saves the buffer, anything else cancels.
 
 **Unsaved edits.** While the buffer differs from the file its title shows `[modified]`, and the forms refuse to run with `Error: Save or discard the editor's changes first.` so the two views never diverge. `q` or `Ctrl-C` with unsaved edits asks `The editor has unsaved changes. [s]ave / [d]iscard / [c]ancel`: `s` saves and quits (a refused save stays open), `d` quits without writing, anything else returns. `Ctrl-R` asks `Discard the editor's changes? [y/N]` and reloads the file on `y`.
+
+## Files
+
+On a workspace of several files (see `cli.md`, Included files) the TUI shows every file and edits them one at a time. On a workspace of one file none of this appears and the screen is as described above.
+
+- **File list.** A pane left of the section list: the root first, then every included file in load order, each with its host count. `•` before a path marks a file whose buffer has unsaved edits; an unreadable file shows `cannot read` and cannot be opened. `F` focuses the pane, and it joins the `Tab` cycle before the section list. `Enter` on a file shows it in the editor and focuses the editor. Paths longer than the pane lose their start to `…`.
+- **Host table.** A **file** column comes first, showing the file name of the file that holds the host. It sorts with `1` and filters with `f` then `1`; the other columns shift one digit right, so `1` … `8` sort. A host's own section is the section inside its file.
+- **Sections.** The section list shows every file's sections; a section name held by two files shows once per file, followed by the file name. `Enter` on a section filters the table to that section and its file; `Enter` on `All` clears both filters. `R` renames the section in its own file.
+- **Editor.** The editor holds one buffer per file, each with its own cursor and undo. Its title shows the path of the file on screen. `o` on a host shows the file that holds it, at its `Host` line.
+- **Save.** `Ctrl-S` saves only the file on screen, after its own backup (`<file>~`, or `<dir>/.<name>~` when an `Include` pattern would match `<file>~`; see `cli.md`, Included files), and reports `✔ Saved ~/.ssh/config.d/cypress.` The other buffers keep their edits.
+- **Forms.** Add, edit, clone, move and delete write to the file the CLI would pick (see `cli.md`, Included files): a host edit to the file holding the host, a section to the file holding it, a new host without a section to the root. The status message names the file, as the CLI does. A section name held by two files refuses the form with `Error: section lab exists in ~/.ssh/config.d/cypress and ~/.ssh/config.d/gke. Edit the file you mean in the editor (F).` The forms refuse to run while any buffer has unsaved edits.
+- **Quit.** `q` or `Ctrl-C` with unsaved edits in several files asks once, listing them: `Unsaved changes in ~/.ssh/config.d/cypress, ~/.ssh/config.d/ranch. [s]ave all / [d]iscard all / [c]ancel`. `s` saves every listed file and quits, unless a save is refused, which leaves the TUI open on that file. With one dirty file the prompt is the single-file one.

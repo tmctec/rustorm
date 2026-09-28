@@ -1,0 +1,46 @@
+Editor
+ Ctrl-S:save  Ctrl-R:discard  Esc:back to table  Tab:focus  Ctrl-C:quit                                                                               
+Sections
+ ?:help  q:quit  Tab:focus  Enter:filter to section  R:rename section  n:new section                                                                  
+Table
+ ?:help  q:quit  Tab:focus  1-7:sort  /:filter  f:column filter  x:clear  a:add  e:edit  d:delete  c:clone  m:move  n:new section  o:editor           
+┌ Sections ──────────┐╔[Hosts 3/3]═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+│All              3  │║Section        Host             User         HostName               Port   Proxy                                Jump          ║
+│bob              1  │║bob            vps              root         vps.example.com        2222   ·                                    ·             ║
+│other            2  │║other          db               postgres     db.internal            ·      ·                                    bastion       ║
+│                    │║other          web              deploy       web.example.com        ·      ssh -W %h:%p bastion                 ·             ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+│                    │║                ╔[Keys]════════════════════════════════════════════════════════════════╗                                      ║
+│                    │║                ║ q                table, sections       quit                          ║                                      ║
+│                    │║                ║ Ctrl-C           any                   quit                          ║                                      ║
+│                    │║                ║ ?                table, sections       toggle this help              ║                                      ║
+│                    │║                ║ Tab / Shift-Tab  panes                 cycle focus                   ║                                      ║
+│                    │║                ║ Up Down / j k    table, sections       move                          ║                                      ║
+│                    │║                ║ g G / Home End   table, sections       first / last                  ║                                      ║
+│                    │║                ║ 1-7              table                 sort by column; again flips   ║                                      ║
+│                    │║                ║ 0                table                 file order                    ║                                      ║
+│                    │║                ║ /                table                 global filter                 ║                                      ║
+│                    │║                ║ f then 1-7       table                 column filter                 ║                                      ║
+└────────────────────┘╚════════════════║ x                table                 clear filters                 ║══════════════════════════════════════╝
+┌ Editor <CONFIG>  ln 1 c║ Enter            sections              filter to section             ║
+│# my ssh config                       ║ a                table                 add host                      ║                                      │
+│Host *                                ║ e / Enter        table                 edit host                     ║                                      │
+│    ServerAliveInterval 60            ║ d                table                 delete host                   ║                                      │
+│                                      ║ c                table                 clone host                    ║                                      │
+│#-------------------------------------║ m                table                 move or rename host           ║                                      │
+│#                                     ║ R                sections              rename section                ║                                      │
+│#                                     ║ n                table, sections       new empty section             ║                                      │
+│#                                     ║ o                table                 open editor at host           ║                                      │
+│#                                     ║ Ctrl-S           editor                save                          ║                                      │
+│#                                     ║ Ctrl-R           editor                discard edits                 ║                                      │
+│#                                     ║ Esc              editor, form, prompt  back / cancel                 ║                                      │
+│#                                     ╚══════════════════════════════════════════════════════════════════════╝                                      │
+│#-----------------------------------------------------------------------------------------------------#                                             │
+│                                                                                                                                                    │
+│Host vps                                                                                                                                            │
+│    HostName vps.example.com                                                                                                                        │
+│    User root                                                                                                                                       │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ vps -> root@vps.example.com:2222                                                                                                                     
+ Esc/?:close help                                                                                                                                     

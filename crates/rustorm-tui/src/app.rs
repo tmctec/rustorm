@@ -9,12 +9,12 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row as TRow,
-    Table, TableState,
+    Table, TableState, Wrap,
 };
 use ratatui::Frame;
 use rustorm_core::{
-    AddSpec, CloneSpec, Config, ConfigFile, EditSpec, Env, Error, HostSelector, ProblemKind,
-    SectionRename, SectionSummary, WriteOptions,
+    join_and, AddSpec, Change, CloneSpec, Config, EditSpec, Env, Error, FileState, HostSelector,
+    ProblemKind, SectionRename, Workspace, WriteOptions,
 };
 
 use crate::editor::Editor;
@@ -46,6 +46,8 @@ impl Options {
 /// The focused pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
+    /// The file list; only on a workspace of several files.
+    Files,
     /// The section list.
     Sections,
     /// The host table.
@@ -78,6 +80,9 @@ enum FormKind {
     },
     RenameSection {
         name: String,
+        /// The file holding it, when another file holds a section of the
+        /// same name.
+        file: Option<usize>,
     },
     AddSection,
 }
@@ -108,6 +113,8 @@ enum Op {
     RenameSection {
         old: String,
         new: String,
+        /// The file as a `--file` argument, when the name is in two files.
+        file: Option<String>,
     },
     AddSection {
         name: String,
@@ -139,10 +146,21 @@ impl Op {
 
 #[derive(Debug, Clone)]
 enum Prompt {
-    Delete { name: String },
-    Overwrite { op: Op, host: String },
+    Delete {
+        name: String,
+        file: usize,
+    },
+    Overwrite {
+        op: Op,
+        host: String,
+    },
+    /// One file has unsaved edits.
     Quit,
-    EditorConflict,
+    /// Several files have unsaved edits; their indices.
+    QuitAll(Vec<usize>),
+    EditorConflict {
+        file: usize,
+    },
     Discard,
 }
 
@@ -179,6 +197,13 @@ fn tilde(path: &Path) -> String {
 fn tui_error(e: &Error) -> String {
     match e {
         Error::HostExists(n) => format!("{n} already exists. Press e on {n} to edit it."),
+        Error::HostExistsIn { name, file } => {
+            format!("{name} already exists in {file}. Press e on {name} to edit it.")
+        }
+        Error::AmbiguousSection { name, files } => format!(
+            "section {name} exists in {}. Edit the file you mean in the editor (F).",
+            join_and(files)
+        ),
         Error::EditTargetMissing(n) => format!("{n} does not exist. Press a to add it."),
         other => other.to_string(),
     }
@@ -241,7 +266,7 @@ fn apply(cfg: &mut Config, op: &Op, env: &Env) -> Result<String, Error> {
                 (false, None) => format!("{n} updated."),
             })
         }
-        Op::RenameSection { old, new } => Ok(match cfg.rename_section(old, new)? {
+        Op::RenameSection { old, new, .. } => Ok(match cfg.rename_section(old, new)? {
             SectionRename::Renamed { from, to } => format!("section {from} renamed to {to}."),
             SectionRename::Merged { from, into } => format!("section {from} merged into {into}."),
         }),
@@ -258,8 +283,108 @@ fn apply(cfg: &mut Config, op: &Op, env: &Env) -> Result<String, Error> {
     }
 }
 
-fn host_text(cfg: &Config, name: &str) -> Option<String> {
-    cfg.find_host(name).map(|l| cfg.host(l).text())
+/// The status text of a workspace change: its messages, then its
+/// warnings.
+fn change_text<T>(c: Change<T>) -> String {
+    let mut parts = c.messages;
+    parts.extend(c.warnings.into_iter().map(|w| format!("Warning: {w}")));
+    parts.join(" ")
+}
+
+/// `op` through the workspace's routed operations (docs/cli.md, Included
+/// files): the messages name the file written.
+fn apply_ws(ws: &mut Workspace, op: &Op, env: &Env) -> Result<String, Error> {
+    Ok(match op {
+        Op::Add(spec) => change_text(ws.add(spec, None, env)?),
+        Op::Edit {
+            spec,
+            remove_identity,
+        } => {
+            let c = ws.edit(spec, None, env)?;
+            if *remove_identity {
+                ws.unset(
+                    &HostSelector::Name(c.value.name.clone()),
+                    &["IdentityFile".to_string()],
+                    None,
+                )?;
+            }
+            change_text(c)
+        }
+        Op::Delete(name) => change_text(ws.delete(std::slice::from_ref(name), None)?),
+        Op::Clone(spec) => change_text(ws.clone_host(spec, None)?),
+        Op::Move {
+            name,
+            new_name,
+            section,
+        } => change_text(ws.move_host(name, new_name.as_deref(), section.as_deref(), None)?),
+        Op::RenameSection { old, new, file } => {
+            change_text(ws.rename_section(old, new, file.as_deref())?)
+        }
+        Op::AddSection { name } => change_text(ws.add_section(name, None, None)?),
+    })
+}
+
+fn host_text(ws: &Workspace, name: &str) -> Option<String> {
+    ws.find_host(name).map(|l| ws.host(l).text())
+}
+
+/// The home directory for `~/` in Include patterns and displayed paths.
+fn home_dir(env: &Env) -> Option<PathBuf> {
+    env.home.clone().or_else(|| {
+        std::env::var_os("HOME")
+            .filter(|h| !h.is_empty())
+            .map(PathBuf::from)
+    })
+}
+
+/// One row of the section list.
+#[derive(Debug, Clone)]
+struct SectionRow {
+    name: String,
+    hosts: usize,
+    /// Index of the file holding it.
+    file: usize,
+    /// Another file holds a section of the same name.
+    shared: bool,
+}
+
+fn section_rows(ws: &Workspace) -> Vec<SectionRow> {
+    if !ws.is_multi() {
+        return ws
+            .root()
+            .config
+            .sections()
+            .into_iter()
+            .map(|s| SectionRow {
+                name: s.name,
+                hosts: s.hosts,
+                file: 0,
+                shared: false,
+            })
+            .collect();
+    }
+    let all = ws.sections();
+    all.iter()
+        .map(|s| SectionRow {
+            name: s.name.clone(),
+            hosts: s.hosts,
+            file: s.index,
+            shared: all
+                .iter()
+                .any(|o| o.index != s.index && o.name.eq_ignore_ascii_case(&s.name)),
+        })
+        .collect()
+}
+
+/// `text` cut to `width` characters, eliding its start.
+fn elide_start(text: &str, width: usize, ellipsis: &str) -> String {
+    let n = text.chars().count();
+    if n <= width {
+        return text.to_string();
+    }
+    let keep = width.saturating_sub(ellipsis.chars().count());
+    let tail: String = text.chars().skip(n - keep).collect();
+    format!("{ellipsis}{tail}")
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -271,6 +396,27 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
         width: w,
         height: h,
     }
+}
+
+/// The key overlay's rows; on a workspace of several files the digit keys
+/// reach 8 and the file list keys join.
+fn help_rows(multi: bool) -> Vec<(&'static str, &'static str, &'static str)> {
+    if !multi {
+        return HELP.to_vec();
+    }
+    let mut rows = Vec::new();
+    for &(k, ctx, act) in HELP {
+        match k {
+            "1-7" => rows.push(("1-8", ctx, act)),
+            "f then 1-7" => rows.push(("f then 1-8", ctx, act)),
+            _ => rows.push((k, ctx, act)),
+        }
+        if k == "Tab / Shift-Tab" {
+            rows.push(("F", "table, sections", "file list"));
+            rows.push(("Enter", "files", "show file in editor"));
+        }
+    }
+    rows
 }
 
 const HELP: &[(&str, &str, &str)] = &[
@@ -301,19 +447,25 @@ const HELP: &[(&str, &str, &str)] = &[
 
 /// The whole TUI: model, view state and the mode it is in.
 pub struct App {
-    file: ConfigFile,
-    stamp: Stamp,
+    ws: Workspace,
+    /// Modification stamp per file of `ws.files`, as loaded or last written.
+    stamps: Vec<Stamp>,
     opts: Options,
     rows: Vec<Row>,
     visible: Vec<usize>,
     sort: Option<Sort>,
     filters: Filters,
     table: TableState,
-    sections: Vec<SectionSummary>,
+    sections: Vec<SectionRow>,
     section_sel: usize,
+    /// Selection in the file list, an index into `ws.load_order`.
+    files_sel: usize,
     focus: Focus,
     mode: Mode,
-    editor: Editor,
+    /// One buffer per file of `ws.files`.
+    editors: Vec<Editor>,
+    /// The file the editor shows.
+    cur: usize,
     msg: Option<Msg>,
     quit: bool,
 }
@@ -327,11 +479,12 @@ impl App {
     /// Loads `config_path`. A missing file loads empty and creates nothing.
     pub fn with_options(config_path: impl AsRef<Path>, opts: Options) -> rustorm_core::Result<App> {
         let path: PathBuf = config_path.as_ref().to_path_buf();
-        let file = ConfigFile::load(&path)?;
-        let editor = Editor::new(&file.original);
+        let ws = Workspace::load_with_home(&path, home_dir(&opts.env).as_deref())?;
+        let editors = ws.files.iter().map(|f| Editor::new(&f.original)).collect();
+        let stamps = ws.files.iter().map(|f| stamp(&f.path)).collect();
         let mut app = App {
-            stamp: stamp(&path),
-            file,
+            ws,
+            stamps,
             opts,
             rows: Vec::new(),
             visible: Vec::new(),
@@ -340,9 +493,11 @@ impl App {
             table: TableState::default(),
             sections: Vec::new(),
             section_sel: 0,
+            files_sel: 0,
             focus: Focus::Table,
             mode: Mode::Normal,
-            editor,
+            editors,
+            cur: 0,
             msg: None,
             quit: false,
         };
@@ -381,19 +536,42 @@ impl App {
         })
     }
 
-    /// The editor buffer.
+    /// The buffer of the file on screen.
     pub fn editor_text(&self) -> String {
-        self.editor.text()
+        self.editors[self.cur].text()
     }
 
     /// The editor cursor `(row, col)`, zero-based.
     pub fn editor_cursor(&self) -> (usize, usize) {
-        self.editor.cursor()
+        self.editors[self.cur].cursor()
     }
 
-    /// True when the editor buffer differs from the file as loaded.
+    /// True when the buffer on screen differs from its file as loaded.
     pub fn is_editor_modified(&self) -> bool {
-        self.editor.text() != self.file.original
+        self.is_dirty(self.cur)
+    }
+
+    /// True when the workspace has more than one file (docs/tui.md, Files).
+    pub fn is_multi(&self) -> bool {
+        self.ws.is_multi()
+    }
+
+    /// The path of the file the editor shows.
+    pub fn shown_file(&self) -> &Path {
+        &self.ws.files[self.cur].path
+    }
+
+    /// The paths of every file, root first, in load order.
+    pub fn files(&self) -> Vec<&Path> {
+        self.ws.files.iter().map(|f| f.path.as_path()).collect()
+    }
+
+    /// The paths of the files whose buffers have unsaved edits.
+    pub fn dirty_files(&self) -> Vec<&Path> {
+        self.dirty()
+            .into_iter()
+            .map(|i| self.ws.files[i].path.as_path())
+            .collect()
     }
 
     /// The active filters.
@@ -438,13 +616,51 @@ impl App {
         });
     }
 
+    fn is_dirty(&self, i: usize) -> bool {
+        self.editors[i].text() != self.ws.files[i].original
+    }
+
+    fn dirty(&self) -> Vec<usize> {
+        (0..self.editors.len())
+            .filter(|&i| self.is_dirty(i))
+            .collect()
+    }
+
+    /// A file's path as the screen shows it.
+    fn show_path(&self, i: usize) -> String {
+        if self.ws.is_multi() {
+            self.ws.display(i)
+        } else {
+            tilde(&self.ws.files[i].path)
+        }
+    }
+
+    /// Shows file `i` in the editor and selects it in the file list.
+    fn show_file(&mut self, i: usize) {
+        self.cur = i;
+        if let Some(p) = self
+            .ws
+            .load_order
+            .iter()
+            .position(|e| e.state == FileState::Loaded(i))
+        {
+            self.files_sel = p;
+        }
+    }
+
     fn refresh(&mut self, select: Option<&str>) {
         let keep = select
             .map(str::to_string)
             .or_else(|| self.selected().map(str::to_string));
-        self.rows = hosts::rows(&self.file.config, &self.opts.env);
-        self.sections = self.file.config.sections();
+        self.rows = hosts::workspace_rows(&self.ws, &self.opts.env);
+        self.sections = section_rows(&self.ws);
         self.section_sel = self.section_sel.min(self.sections.len());
+        self.files_sel = self
+            .files_sel
+            .min(self.ws.load_order.len().saturating_sub(1));
+        if !self.ws.is_multi() && self.focus == Focus::Files {
+            self.focus = Focus::Table;
+        }
         if self.sections.is_empty() && self.focus == Focus::Sections {
             self.focus = Focus::Table;
         }
@@ -452,13 +668,33 @@ impl App {
         self.select_name(keep.as_deref());
     }
 
-    fn reload(&mut self) -> Result<(), String> {
-        let file = ConfigFile::load(&self.file.path).map_err(|e| e.to_string())?;
-        self.editor.set_text(&file.original);
-        self.file = file;
-        self.stamp = stamp(&self.file.path);
+    /// Re-reads file `i`, dropping its buffer's edits.
+    fn reload(&mut self, i: usize) -> Result<(), String> {
+        self.ws.reload_file(i).map_err(|e| e.to_string())?;
+        self.editors[i].set_text(&self.ws.files[i].original);
+        self.stamps[i] = stamp(&self.ws.files[i].path);
         self.refresh(None);
         Ok(())
+    }
+
+    /// Replaces the whole workspace with `fresh`, every buffer with its
+    /// file's text.
+    fn replace_workspace(&mut self, fresh: Workspace) {
+        if fresh.files.len() == self.editors.len() {
+            for (e, f) in self.editors.iter_mut().zip(&fresh.files) {
+                e.set_text(&f.original);
+            }
+        } else {
+            self.editors = fresh
+                .files
+                .iter()
+                .map(|f| Editor::new(&f.original))
+                .collect();
+            self.cur = self.cur.min(fresh.files.len() - 1);
+        }
+        self.stamps = fresh.files.iter().map(|f| stamp(&f.path)).collect();
+        self.ws = fresh;
+        self.refresh(None);
     }
 
     fn error(&mut self, s: impl Into<String>) {
@@ -471,8 +707,12 @@ impl App {
         }
     }
 
-    fn disk_changed(&self) -> bool {
-        stamp(&self.file.path) != self.stamp
+    fn disk_changed(&self, i: usize) -> bool {
+        stamp(&self.ws.files[i].path) != self.stamps[i]
+    }
+
+    fn any_disk_changed(&self) -> bool {
+        (0..self.ws.files.len()).any(|i| self.disk_changed(i))
     }
 
     // ----- writes -----
@@ -481,38 +721,51 @@ impl App {
     /// on disk, a prompt when the target host itself changed (F9).
     /// `Err` carries the message for the form.
     fn run_op(&mut self, op: Op, force: bool) -> Result<bool, String> {
-        if !force && self.disk_changed() {
-            let fresh = ConfigFile::load(&self.file.path).map_err(|e| tui_error(&e))?;
+        if !force && self.any_disk_changed() {
+            let fresh = Workspace::load_with_home(
+                self.ws.files[0].path.clone(),
+                self.ws.home.clone().as_deref(),
+            )
+            .map_err(|e| tui_error(&e))?;
             let conflict = op.target().and_then(|t| {
-                (host_text(&self.file.config, t) != host_text(&fresh.config, t))
-                    .then(|| t.to_string())
+                (host_text(&self.ws, t) != host_text(&fresh, t)).then(|| t.to_string())
             });
-            self.editor.set_text(&fresh.original);
-            self.file = fresh;
-            self.stamp = stamp(&self.file.path);
-            self.refresh(None);
+            self.replace_workspace(fresh);
             if let Some(host) = conflict {
                 self.mode = Mode::Prompt(Prompt::Overwrite { op, host });
                 return Ok(false);
             }
         }
-        let mut next = self.file.clone();
-        let msg = apply(&mut next.config, &op, &self.opts.env).map_err(|e| tui_error(&e))?;
-        next.save(self.options()).map_err(|e| tui_error(&e))?;
-        self.file = next;
-        self.stamp = stamp(&self.file.path);
-        self.editor.set_text(&self.file.original);
+        let msg = if self.ws.is_multi() {
+            let mut next = self.ws.clone();
+            let msg = apply_ws(&mut next, &op, &self.opts.env).map_err(|e| tui_error(&e))?;
+            next.save(self.options()).map_err(|e| tui_error(&e))?;
+            self.ws = next;
+            msg
+        } else {
+            let mut next = self.ws.files[0].clone();
+            let msg = apply(&mut next.config, &op, &self.opts.env).map_err(|e| tui_error(&e))?;
+            next.save(self.options()).map_err(|e| tui_error(&e))?;
+            self.ws.files[0] = next;
+            msg
+        };
+        for i in 0..self.ws.files.len() {
+            self.stamps[i] = stamp(&self.ws.files[i].path);
+            self.editors[i].set_text(&self.ws.files[i].original);
+        }
         self.refresh(op.focus_name().as_deref());
         self.msg = Some(Msg::Success(msg));
         Ok(true)
     }
 
-    /// Saves the editor buffer. Returns true when written.
-    fn save_editor(&mut self, force: bool) -> bool {
-        let text = self.editor.text();
+    /// Saves the buffer of file `i` to that file alone. Returns true when
+    /// written; a refused save shows that file in the editor.
+    fn save_editor(&mut self, i: usize, force: bool) -> bool {
+        let text = self.editors[i].text();
         let parsed = match Config::parse(&text) {
             Ok(c) => c,
             Err(e) => {
+                self.show_file(i);
                 self.error(format!("Not saved: {e}"));
                 return false;
             }
@@ -523,45 +776,55 @@ impl App {
             .into_iter()
             .find(|p| p.kind == ProblemKind::UnparsableLine);
         if let Some(p) = bad {
+            self.show_file(i);
             if let Some(line) = p.line {
-                self.editor.jump(line.saturating_sub(1));
+                self.editors[i].jump(line.saturating_sub(1));
             }
             self.focus = Focus::Editor;
             self.error(format!("Not saved: {p}"));
             return false;
         }
-        if !force && self.disk_changed() {
-            self.mode = Mode::Prompt(Prompt::EditorConflict);
+        if !force && self.disk_changed(i) {
+            self.show_file(i);
+            self.mode = Mode::Prompt(Prompt::EditorConflict { file: i });
             return false;
         }
         let mut cfg = parsed;
         cfg.sort_sections();
         let out = cfg.render();
-        let mut next = self.file.clone();
-        if let Err(e) = next.save_text(&out, self.options()) {
+        let saved = if self.ws.is_multi() {
+            self.ws.save_text(i, &out, self.options())
+        } else {
+            let mut next = self.ws.files[0].clone();
+            next.save_text(&out, self.options()).map(|()| {
+                self.ws.files[0] = next;
+            })
+        };
+        if let Err(e) = saved {
+            self.show_file(i);
             self.error(format!("Not saved: {e}"));
             return false;
         }
-        self.file = next;
-        self.stamp = stamp(&self.file.path);
-        self.editor.set_text(&out);
+        self.stamps[i] = stamp(&self.ws.files[i].path);
+        self.editors[i].set_text(&out);
         self.refresh(None);
-        self.msg = Some(Msg::Success(format!("Saved {}.", tilde(&self.file.path))));
+        self.msg = Some(Msg::Success(format!("Saved {}.", self.show_path(i))));
         true
     }
 
     fn request_quit(&mut self) {
-        if self.is_editor_modified() {
-            self.mode = Mode::Prompt(Prompt::Quit);
-        } else {
-            self.quit = true;
+        let dirty = self.dirty();
+        match dirty.len() {
+            0 => self.quit = true,
+            1 => self.mode = Mode::Prompt(Prompt::Quit),
+            _ => self.mode = Mode::Prompt(Prompt::QuitAll(dirty)),
         }
     }
 
     // ----- forms -----
 
     fn open_form(&mut self, kind: FormKind) {
-        if self.is_editor_modified() {
+        if !self.dirty().is_empty() {
             self.error("Save or discard the editor's changes first.");
             return;
         }
@@ -626,7 +889,7 @@ impl App {
                     ("Section", section.clone().unwrap_or_default()),
                 ],
             ),
-            FormKind::RenameSection { name } => (
+            FormKind::RenameSection { name, .. } => (
                 format!("Rename section {name}"),
                 vec![("New name", name.clone())],
             ),
@@ -717,13 +980,14 @@ impl App {
                     section: new_section,
                 })
             }
-            FormKind::RenameSection { name } => {
+            FormKind::RenameSection { name, file } => {
                 if f(0).is_empty() || f(0) == *name {
                     return Err("Give the section a new name.".into());
                 }
                 Ok(Op::RenameSection {
                     old: name.clone(),
                     new: f(0),
+                    file: file.map(|i| self.ws.abs(i).display().to_string()),
                 })
             }
             FormKind::AddSection => {
@@ -786,7 +1050,7 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let mode = std::mem::replace(&mut self.mode, Mode::Normal);
         if ctrl && key.code == KeyCode::Char('c') {
-            if matches!(mode, Mode::Prompt(Prompt::Quit)) {
+            if matches!(mode, Mode::Prompt(Prompt::Quit | Prompt::QuitAll(_))) {
                 self.mode = mode;
             } else {
                 self.request_quit();
@@ -798,6 +1062,7 @@ impl App {
                 self.msg = None;
                 match self.focus {
                     Focus::Editor => self.handle_editor(key),
+                    Focus::Files => self.handle_files(key),
                     Focus::Table => self.handle_table(key),
                     Focus::Sections => self.handle_sections(key),
                 }
@@ -814,13 +1079,14 @@ impl App {
             Mode::Prompt(p) => self.handle_prompt(p, key),
             Mode::PickFilterColumn => {
                 if let KeyCode::Char(c) = key.code {
-                    match Column::from_digit(c) {
+                    match Column::from_digit_in(c, self.ws.is_multi()) {
                         Some(col) => {
                             self.mode = Mode::Filter {
                                 column: Some(col),
                                 previous: self.filters.get(col).to_string(),
                             }
                         }
+                        None if self.ws.is_multi() => self.error("Press 1-8 to pick a column."),
                         None => self.error("Press 1-7 to pick a column."),
                     }
                 }
@@ -858,7 +1124,7 @@ impl App {
             _ => None,
         };
         match prompt {
-            Prompt::Delete { name } => {
+            Prompt::Delete { name, .. } => {
                 if ch == Some('y') {
                     if let Err(e) = self.run_op(Op::Delete(name), false) {
                         self.error(e);
@@ -880,29 +1146,42 @@ impl App {
             }
             Prompt::Quit => match ch {
                 Some('s') => {
-                    if self.save_editor(false) {
+                    let i = self.dirty().first().copied().unwrap_or(self.cur);
+                    if self.save_editor(i, false) {
                         self.quit = true;
                     }
                 }
                 Some('d') => self.quit = true,
                 _ => {}
             },
-            Prompt::EditorConflict => match ch {
+            Prompt::QuitAll(files) => match ch {
+                Some('s') => {
+                    for i in files {
+                        if self.is_dirty(i) && !self.save_editor(i, false) {
+                            return;
+                        }
+                    }
+                    self.quit = true;
+                }
+                Some('d') => self.quit = true,
+                _ => {}
+            },
+            Prompt::EditorConflict { file } => match ch {
                 Some('r') => {
-                    if let Err(e) = self.reload() {
+                    if let Err(e) = self.reload(file) {
                         self.error(e);
                     } else {
                         self.msg = Some(Msg::Info("Reloaded the file from disk.".into()));
                     }
                 }
                 Some('o') => {
-                    self.save_editor(true);
+                    self.save_editor(file, true);
                 }
                 _ => self.msg = Some(Msg::Info("Not saved.".into())),
             },
             Prompt::Discard => {
                 if ch == Some('y') {
-                    match self.reload() {
+                    match self.reload(self.cur) {
                         Ok(()) => {
                             self.msg = Some(Msg::Info("Discarded the editor's changes.".into()))
                         }
@@ -918,6 +1197,9 @@ impl App {
         if !self.sections.is_empty() {
             order.insert(0, Focus::Sections);
         }
+        if self.ws.is_multi() {
+            order.insert(0, Focus::Files);
+        }
         let i = order.iter().position(|f| *f == self.focus).unwrap_or(0);
         let n = order.len();
         self.focus = order[if back { (i + n - 1) % n } else { (i + 1) % n }];
@@ -927,7 +1209,7 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('s') if ctrl => {
-                self.save_editor(false);
+                self.save_editor(self.cur, false);
             }
             KeyCode::Char('r') if ctrl => {
                 if self.is_editor_modified() {
@@ -938,7 +1220,7 @@ impl App {
             KeyCode::Tab => self.cycle_focus(false),
             KeyCode::BackTab => self.cycle_focus(true),
             _ => {
-                self.editor.area.input(key);
+                self.editors[self.cur].area.input(key);
             }
         }
     }
@@ -966,6 +1248,7 @@ impl App {
             KeyCode::Tab => self.cycle_focus(false),
             KeyCode::BackTab => self.cycle_focus(true),
             KeyCode::Char('n') => self.open_form(FormKind::AddSection),
+            KeyCode::Char('F') if self.ws.is_multi() => self.focus = Focus::Files,
             KeyCode::Down | KeyCode::Char('j') => {
                 let s = self.move_sel(1, len, cur);
                 self.table.select((len > 0).then_some(s));
@@ -982,8 +1265,8 @@ impl App {
                 self.sort = None;
                 self.view_changed();
             }
-            KeyCode::Char(c) if Column::from_digit(c).is_some() => {
-                let col = Column::from_digit(c).expect("checked");
+            KeyCode::Char(c) if Column::from_digit_in(c, self.ws.is_multi()).is_some() => {
+                let col = Column::from_digit_in(c, self.ws.is_multi()).expect("checked");
                 self.sort = Some(match self.sort {
                     Some(s) if s.column == col => Sort {
                         column: col,
@@ -1010,14 +1293,12 @@ impl App {
             KeyCode::Char('a') => self.open_form(FormKind::Add),
             KeyCode::Char('e') | KeyCode::Enter => {
                 if let Some(name) = need_host(self) {
-                    let (identity, section) = match self.file.config.find_primary(&name) {
+                    let fi = self.selected_row().map_or(0, |r| r.file_index);
+                    let config = &self.ws.files[fi].config;
+                    let (identity, section) = match config.find_primary(&name) {
                         Some(l) => (
-                            self.file
-                                .config
-                                .host(l)
-                                .get("IdentityFile")
-                                .unwrap_or_default(),
-                            self.file.config.section_name(l).map(str::to_string),
+                            config.host(l).get("IdentityFile").unwrap_or_default(),
+                            config.section_name(l).map(str::to_string),
                         ),
                         None => (String::new(), None),
                     };
@@ -1030,10 +1311,11 @@ impl App {
             }
             KeyCode::Char('d') => {
                 if let Some(name) = need_host(self) {
-                    if self.is_editor_modified() {
+                    if !self.dirty().is_empty() {
                         self.error("Save or discard the editor's changes first.");
                     } else {
-                        self.mode = Mode::Prompt(Prompt::Delete { name });
+                        let file = self.selected_row().map_or(0, |r| r.file_index);
+                        self.mode = Mode::Prompt(Prompt::Delete { name, file });
                     }
                 }
             }
@@ -1050,8 +1332,16 @@ impl App {
             }
             KeyCode::Char('o') => {
                 if let Some(name) = need_host(self) {
-                    if let Some(row) = self.editor.find_host_line(&name) {
-                        self.editor.jump(row);
+                    let fi = self.selected_row().map_or(0, |r| r.file_index);
+                    self.show_file(fi);
+                    let row = self.editors[fi].find_host_line(&name).or_else(|| {
+                        let config = &self.ws.files[fi].config;
+                        config
+                            .find_primary(&name)
+                            .map(|l| config.host_line(l).saturating_sub(1))
+                    });
+                    if let Some(row) = row {
+                        self.editors[fi].jump(row);
                     }
                     self.focus = Focus::Editor;
                 }
@@ -1075,22 +1365,61 @@ impl App {
             }
             KeyCode::Home | KeyCode::Char('g') => self.section_sel = 0,
             KeyCode::End | KeyCode::Char('G') => self.section_sel = len - 1,
+            KeyCode::Char('F') if self.ws.is_multi() => self.focus = Focus::Files,
             KeyCode::Enter => {
-                self.filters.columns[Column::Section.index()] = match self.section_sel {
-                    0 => String::new(),
-                    i => self.sections[i - 1].name.clone(),
-                };
+                let picked = self.section_sel.checked_sub(1).map(|i| &self.sections[i]);
+                let section = picked.map_or(String::new(), |s| s.name.clone());
+                if self.ws.is_multi() {
+                    self.filters.columns[Column::File.index()] =
+                        picked.map_or(String::new(), |s| self.ws.file_name(s.file));
+                }
+                self.filters.columns[Column::Section.index()] = section;
                 self.view_changed();
             }
             KeyCode::Char('R') => {
                 if self.section_sel == 0 {
                     self.error("Pick a section to rename.");
                 } else {
-                    let name = self.sections[self.section_sel - 1].name.clone();
-                    self.open_form(FormKind::RenameSection { name });
+                    let s = &self.sections[self.section_sel - 1];
+                    let name = s.name.clone();
+                    let file = s.shared.then_some(s.file);
+                    self.open_form(FormKind::RenameSection { name, file });
                 }
             }
             KeyCode::Char('n') => self.open_form(FormKind::AddSection),
+            _ => {}
+        }
+    }
+
+    fn handle_files(&mut self, key: KeyEvent) {
+        let len = self.ws.load_order.len();
+        match key.code {
+            KeyCode::Char('q') => self.request_quit(),
+            KeyCode::Char('?') => self.mode = Mode::Help,
+            KeyCode::Tab => self.cycle_focus(false),
+            KeyCode::BackTab => self.cycle_focus(true),
+            KeyCode::Esc => self.focus = Focus::Table,
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.files_sel = self.move_sel(1, len, self.files_sel)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.files_sel = self.move_sel(-1, len, self.files_sel)
+            }
+            KeyCode::Home | KeyCode::Char('g') => self.files_sel = 0,
+            KeyCode::End | KeyCode::Char('G') => self.files_sel = len - 1,
+            KeyCode::Enter => {
+                let entry = &self.ws.load_order[self.files_sel];
+                match &entry.state {
+                    FileState::Loaded(i) => {
+                        self.show_file(*i);
+                        self.focus = Focus::Editor;
+                    }
+                    FileState::Unreadable(reason) => {
+                        let path = self.ws.display_path(&entry.path);
+                        self.error(format!("Cannot open {path}: cannot read ({reason})."));
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1128,19 +1457,29 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(outer[0]);
-        let top = if self.sections.is_empty() {
-            vec![Rect::default(), panes[0]]
-        } else {
-            Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(22), Constraint::Min(20)])
-                .split(panes[0])
-                .to_vec()
-        };
-        if !self.sections.is_empty() {
-            self.render_sections(frame, top[0]);
+        let multi = self.ws.is_multi();
+        let mut widths = Vec::new();
+        if multi {
+            widths.push(Constraint::Length(self.files_width()));
         }
-        self.render_table(frame, top[1]);
+        if !self.sections.is_empty() {
+            widths.push(Constraint::Length(22));
+        }
+        widths.push(Constraint::Min(20));
+        let top = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(widths)
+            .split(panes[0]);
+        let mut at = 0;
+        if multi {
+            self.render_files(frame, top[at]);
+            at += 1;
+        }
+        if !self.sections.is_empty() {
+            self.render_sections(frame, top[at]);
+            at += 1;
+        }
+        self.render_table(frame, top[at]);
         self.render_editor(frame, panes[1]);
         self.render_status(frame, outer[1]);
         self.render_help_bar(frame, outer[2]);
@@ -1152,11 +1491,76 @@ impl App {
         }
     }
 
+    /// Width of the file list: the longest path plus the marker and the
+    /// count, between 24 and 32 columns; longer paths lose their start.
+    fn files_width(&self) -> u16 {
+        let longest = self
+            .ws
+            .load_order
+            .iter()
+            .map(|e| self.ws.display_path(&e.path).chars().count())
+            .max()
+            .unwrap_or(0);
+        (longest + 9).clamp(24, 32) as u16
+    }
+
+    fn render_files(&self, frame: &mut Frame, area: Rect) {
+        let theme = self.opts.theme;
+        let inner = area.width.saturating_sub(2) as usize;
+        let items: Vec<ListItem> = self
+            .ws
+            .load_order
+            .iter()
+            .map(|e| {
+                let path = self.ws.display_path(&e.path);
+                match &e.state {
+                    FileState::Loaded(i) => {
+                        let hosts = self.rows.iter().filter(|r| r.file_index == *i).count();
+                        let w = inner.saturating_sub(7);
+                        let path = elide_start(&path, w, theme.ellipsis());
+                        let marker = if self.is_dirty(*i) {
+                            theme.dirty()
+                        } else {
+                            " "
+                        };
+                        ListItem::new(Line::from(vec![
+                            Span::styled(marker, Style::default().add_modifier(Modifier::BOLD)),
+                            Span::raw(format!(" {path:<w$}{hosts:>4}")),
+                        ]))
+                    }
+                    FileState::Unreadable(_) => {
+                        let w = inner.saturating_sub(14);
+                        let path = elide_start(&path, w, theme.ellipsis());
+                        ListItem::new(Line::from(vec![
+                            Span::raw(format!("  {path:<w$}")),
+                            Span::styled(" cannot read", theme.muted()),
+                        ]))
+                    }
+                }
+            })
+            .collect();
+        let focused = self.focus == Focus::Files;
+        let list = List::new(items)
+            .block(self.pane_block("Files".into(), focused))
+            .highlight_style(if focused {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default().add_modifier(Modifier::BOLD)
+            });
+        let mut state = ListState::default().with_selected(Some(self.files_sel));
+        frame.render_stateful_widget(list, area, &mut state);
+    }
+
     fn render_sections(&self, frame: &mut Frame, area: Rect) {
         let total = self.rows.len();
         let mut items = vec![ListItem::new(format!("{:<14}{:>4}", "All", total))];
         for s in &self.sections {
-            let name: String = s.name.chars().take(14).collect();
+            let label = if s.shared {
+                format!("{} {}", s.name, self.ws.file_name(s.file))
+            } else {
+                s.name.clone()
+            };
+            let name: String = label.chars().take(14).collect();
             items.push(ListItem::new(format!("{name:<14}{:>4}", s.hosts)));
         }
         let focused = self.focus == Focus::Sections;
@@ -1178,7 +1582,8 @@ impl App {
             format!("Hosts {}/{}", self.visible.len(), self.rows.len()),
             focused,
         );
-        let header = TRow::new(Column::ALL.iter().map(|c| {
+        let columns = Column::shown(self.ws.is_multi());
+        let header = TRow::new(columns.iter().map(|c| {
             let mut t = c.title().to_string();
             if let Some(s) = self.sort.filter(|s| s.column == *c) {
                 t.push_str(theme.arrow(s.ascending));
@@ -1189,23 +1594,35 @@ impl App {
             Cell::from(t)
         }))
         .style(Style::default().add_modifier(Modifier::BOLD));
-        let widths = [
-            Constraint::Length(14),
-            Constraint::Length(16),
-            Constraint::Length(12),
-            Constraint::Length(22),
-            Constraint::Length(6),
-            Constraint::Fill(1),
-            Constraint::Length(14),
-        ];
+        // The file column and pane take room, so a workspace of several
+        // files uses narrower columns and keeps the proxy visible.
+        let widths: Vec<Constraint> = if self.ws.is_multi() {
+            vec![
+                Constraint::Length(10),
+                Constraint::Length(12),
+                Constraint::Length(14),
+                Constraint::Length(10),
+                Constraint::Length(18),
+                Constraint::Length(5),
+                Constraint::Fill(1),
+                Constraint::Length(10),
+            ]
+        } else {
+            vec![
+                Constraint::Length(14),
+                Constraint::Length(16),
+                Constraint::Length(12),
+                Constraint::Length(22),
+                Constraint::Length(6),
+                Constraint::Fill(1),
+                Constraint::Length(14),
+            ]
+        };
         if self.visible.is_empty() {
             let inner = block.inner(area);
             frame.render_widget(block, area);
             let line = if self.filters.is_empty() {
-                format!(
-                    "no hosts in {}. Press a to add one.",
-                    tilde(&self.file.path)
-                )
+                format!("no hosts in {}. Press a to add one.", self.show_path(0))
             } else {
                 format!("no hosts match filter: {}", self.filters.describe())
             };
@@ -1220,7 +1637,7 @@ impl App {
         let missing = theme.missing();
         let rows = self.visible.iter().map(|i| {
             let r = &self.rows[*i];
-            TRow::new(Column::ALL.iter().map(|c| match r.get(*c) {
+            TRow::new(columns.iter().map(|c| match r.get(*c) {
                 Some(v) => Cell::from(v.to_string()),
                 None => Cell::from(Span::styled(missing, theme.muted())),
             }))
@@ -1233,7 +1650,7 @@ impl App {
     }
 
     fn render_editor(&mut self, frame: &mut Frame, area: Rect) {
-        let (r, c) = self.editor.cursor();
+        let (r, c) = self.editors[self.cur].cursor();
         let modified = if self.is_editor_modified() {
             " [modified]"
         } else {
@@ -1243,14 +1660,14 @@ impl App {
         let block = self.pane_block(
             format!(
                 "Editor {}{modified}  ln {} col {}",
-                tilde(&self.file.path),
+                self.show_path(self.cur),
                 r + 1,
                 c + 1
             ),
             focused,
         );
         let theme = self.opts.theme;
-        self.editor.render(frame, area, block, &theme, focused);
+        self.editors[self.cur].render(frame, area, block, &theme, focused);
     }
 
     fn render_status(&self, frame: &mut Frame, area: Rect) {
@@ -1269,7 +1686,11 @@ impl App {
                 spans.push(Span::styled("  Enter: keep  Esc: undo", theme.muted()));
             }
             Mode::PickFilterColumn => spans.push(Span::styled(
-                "Filter which column? 1 section 2 host 3 user 4 hostname 5 port 6 proxy 7 jump",
+                if self.ws.is_multi() {
+                    "Filter which column? 1 file 2 section 3 host 4 user 5 hostname 6 port 7 proxy 8 jump"
+                } else {
+                    "Filter which column? 1 section 2 host 3 user 4 hostname 5 port 6 proxy 7 jump"
+                },
                 Style::default().add_modifier(Modifier::BOLD),
             )),
             _ => {
@@ -1299,6 +1720,7 @@ impl App {
     }
 
     fn render_help_bar(&self, frame: &mut Frame, area: Rect) {
+        let multi = self.ws.is_multi();
         let text = match (&self.mode, self.focus) {
             (Mode::Form(_), _) => "Enter:submit  Tab:next field  Shift-Tab:previous  Esc:cancel",
             (Mode::Prompt(_), _) => "answer the prompt  Esc:cancel",
@@ -1306,6 +1728,15 @@ impl App {
                 "type to filter  Enter:keep  Esc:undo"
             }
             (Mode::Help, _) => "Esc/?:close help",
+            (_, Focus::Table) if multi => {
+                "?:help  q:quit  Tab:focus  F:files  1-8:sort  /:filter  f:column filter  x:clear  a:add  e:edit  d:delete  c:clone  m:move  n:new section  o:editor"
+            }
+            (_, Focus::Sections) if multi => {
+                "?:help  q:quit  Tab:focus  F:files  Enter:filter to section  R:rename section  n:new section"
+            }
+            (_, Focus::Files) => {
+                "?:help  q:quit  Tab:focus  j/k:move  Enter:show in editor  Esc:back to table"
+            }
             (_, Focus::Table) => {
                 "?:help  q:quit  Tab:focus  1-7:sort  /:filter  f:column filter  x:clear  a:add  e:edit  d:delete  c:clone  m:move  n:new section  o:editor"
             }
@@ -1324,11 +1755,12 @@ impl App {
     }
 
     fn render_help(&self, frame: &mut Frame, area: Rect) {
-        let lines: Vec<Line> = HELP
+        let rows = help_rows(self.ws.is_multi());
+        let lines: Vec<Line> = rows
             .iter()
             .map(|(k, ctx, act)| Line::from(format!(" {k:<17}{ctx:<22}{act}")))
             .collect();
-        let rect = centered(area, 72, HELP.len() as u16 + 2);
+        let rect = centered(area, 72, rows.len() as u16 + 2);
         frame.render_widget(Clear, rect);
         frame.render_widget(
             Paragraph::new(lines).block(self.pane_block("Keys".into(), true)),
@@ -1373,14 +1805,21 @@ impl App {
 
     fn prompt_text(&self, p: &Prompt) -> String {
         match p {
-            Prompt::Delete { name } => {
-                format!("Delete host {name} from {}? [y/N]", tilde(&self.file.path))
+            Prompt::Delete { name, file } => {
+                format!("Delete host {name} from {}? [y/N]", self.show_path(*file))
             }
             Prompt::Overwrite { host, .. } => {
                 format!("{host} changed on disk since it was loaded. Overwrite it? [y/N]")
             }
             Prompt::Quit => "The editor has unsaved changes. [s]ave / [d]iscard / [c]ancel".into(),
-            Prompt::EditorConflict => {
+            Prompt::QuitAll(files) => {
+                let paths: Vec<String> = files.iter().map(|&i| self.show_path(i)).collect();
+                format!(
+                    "Unsaved changes in {}. [s]ave all / [d]iscard all / [c]ancel",
+                    paths.join(", ")
+                )
+            }
+            Prompt::EditorConflict { .. } => {
                 "The file changed on disk. [r]eload (drop your edits) / [o]verwrite / [c]ancel"
                     .into()
             }
@@ -1389,11 +1828,17 @@ impl App {
     }
 
     fn render_prompt(&self, frame: &mut Frame, area: Rect, p: &Prompt) {
-        let text = self.prompt_text(p);
-        let rect = centered(area, text.chars().count() as u16 + 4, 3);
+        let text = format!(" {}", self.prompt_text(p));
+        let want = text.chars().count() as u16 + 3;
+        let width = want.min(area.width.saturating_sub(4)).max(10);
+        let len = text.chars().count() as u16;
+        let height = len.div_ceil(width.saturating_sub(2).max(1)) + 2;
+        let rect = centered(area, width, height);
         frame.render_widget(Clear, rect);
         frame.render_widget(
-            Paragraph::new(format!(" {text}")).block(self.pane_block("Confirm".into(), true)),
+            Paragraph::new(text)
+                .wrap(Wrap { trim: false })
+                .block(self.pane_block("Confirm".into(), true)),
             rect,
         );
     }

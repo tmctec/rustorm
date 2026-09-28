@@ -3,7 +3,7 @@
 
 use std::cmp::Ordering;
 
-use rustorm_core::{Config, Env};
+use rustorm_core::{Config, Env, Workspace};
 
 /// A host table column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +22,8 @@ pub enum Column {
     Proxy,
     /// `ProxyJump` ("jump machines").
     Jump,
+    /// The file holding the host; only on a workspace of several files.
+    File,
 }
 
 impl Column {
@@ -36,15 +38,43 @@ impl Column {
         Column::Jump,
     ];
 
-    /// Position in [`Column::ALL`].
+    /// Every column on a workspace of several files: the file first, so
+    /// key `1` is the file and `8` the jump.
+    pub const MULTI: [Column; 8] = [
+        Column::File,
+        Column::Section,
+        Column::Host,
+        Column::User,
+        Column::HostName,
+        Column::Port,
+        Column::Proxy,
+        Column::Jump,
+    ];
+
+    /// The columns shown: [`Column::MULTI`] when `multi`, else [`Column::ALL`].
+    pub fn shown(multi: bool) -> &'static [Column] {
+        if multi {
+            &Column::MULTI
+        } else {
+            &Column::ALL
+        }
+    }
+
+    /// Slot in [`Filters::columns`].
     pub fn index(self) -> usize {
         self as usize
     }
 
     /// The column for a digit key `1`..`7`.
     pub fn from_digit(c: char) -> Option<Column> {
+        Column::from_digit_in(c, false)
+    }
+
+    /// The column for a digit key: `1`..`7`, or `1`..`8` when `multi`.
+    pub fn from_digit_in(c: char, multi: bool) -> Option<Column> {
+        let cols = Column::shown(multi);
         let d = c.to_digit(10)? as usize;
-        (1..=7).contains(&d).then(|| Column::ALL[d - 1])
+        (1..=cols.len()).contains(&d).then(|| cols[d - 1])
     }
 
     /// Header text.
@@ -57,6 +87,7 @@ impl Column {
             Column::Port => "Port",
             Column::Proxy => "Proxy",
             Column::Jump => "Jump",
+            Column::File => "File",
         }
     }
 
@@ -70,6 +101,7 @@ impl Column {
             Column::Port => "port",
             Column::Proxy => "proxy",
             Column::Jump => "jump",
+            Column::File => "file",
         }
     }
 }
@@ -93,6 +125,11 @@ pub struct Row {
     pub jump: Option<String>,
     /// `name -> user@hostname:port`, user and port resolved as `list` does.
     pub target: String,
+    /// The file name of the file holding the host; `None` on a workspace
+    /// of one file, so the file never shows, sorts or filters there.
+    pub file: Option<String>,
+    /// Index of the file holding the host in `Workspace::files`.
+    pub file_index: usize,
 }
 
 impl Row {
@@ -106,6 +143,7 @@ impl Row {
             Column::Port => self.port.as_deref(),
             Column::Proxy => self.proxy.as_deref(),
             Column::Jump => self.jump.as_deref(),
+            Column::File => self.file.as_deref(),
         }
     }
 }
@@ -127,6 +165,37 @@ pub fn rows(config: &Config, env: &Env) -> Vec<Row> {
                 hostname: r.hostname,
                 proxy: r.proxy_command,
                 jump: r.proxy_jump,
+                file: None,
+                file_index: 0,
+            }
+        })
+        .collect()
+}
+
+/// Builds the rows of every file of `ws`, grouped by file in load order.
+/// On a workspace of one file this is [`rows`] of the root.
+pub fn workspace_rows(ws: &Workspace, env: &Env) -> Vec<Row> {
+    if !ws.is_multi() {
+        return rows(&ws.root().config, env);
+    }
+    ws.list(env)
+        .into_iter()
+        .map(|w| {
+            let config = &ws.files[w.file].config;
+            let r = w.row;
+            let own = config.find_primary(&r.name).map(|l| config.host(l));
+            let get = |k: &str| own.and_then(|h| h.get(k));
+            Row {
+                target: r.line(),
+                user: get("User"),
+                port: get("Port"),
+                name: r.name,
+                section: r.section,
+                hostname: r.hostname,
+                proxy: r.proxy_command,
+                jump: r.proxy_jump,
+                file: Some(ws.file_name(w.file)),
+                file_index: w.file,
             }
         })
         .collect()
@@ -176,7 +245,7 @@ fn contains_ci(haystack: &str, needle: &str) -> bool {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Filters {
     /// One filter per column, indexed by [`Column::index`].
-    pub columns: [String; 7],
+    pub columns: [String; 8],
     /// Matches any column.
     pub global: String,
 }
@@ -194,21 +263,21 @@ impl Filters {
 
     /// True when `row` passes every non-empty filter.
     pub fn matches(&self, row: &Row) -> bool {
-        for c in Column::ALL {
+        for c in Column::MULTI {
             let f = self.get(c);
             if !f.is_empty() && !row.get(c).is_some_and(|v| contains_ci(v, f)) {
                 return false;
             }
         }
         self.global.is_empty()
-            || Column::ALL
+            || Column::MULTI
                 .iter()
                 .any(|c| row.get(*c).is_some_and(|v| contains_ci(v, &self.global)))
     }
 
     /// `section~bob user~deploy any~x`, or empty.
     pub fn describe(&self) -> String {
-        let mut parts: Vec<String> = Column::ALL
+        let mut parts: Vec<String> = Column::MULTI
             .iter()
             .filter(|c| !self.get(**c).is_empty())
             .map(|c| format!("{}~{}", c.key(), self.get(*c)))

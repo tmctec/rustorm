@@ -1,0 +1,60 @@
+┌ Sections ──────────┐╔[Hosts 7/7]═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+│All              7  │║Section        Host             User         HostName               Port   Proxy                                Jump          ║
+│alpha            2  │║·              gnu              carol        gnu.example.com        ·      ·                                    ·             ║
+│bob              2  │║alpha          ant              deploy       ant.example.com        2201   ssh -W %h:%p gw1                     ·             ║
+│other            2  │║alpha          fox              zed          fox.example.com        ·      corkscrew                            bastion1      ║
+│                    │║bob            bee              deploy       bee.example.com        22     ·                                    bastion2      ║
+│                    │║bob            cat              root         cat.example.com        ·      nc gw2                               ·             ║
+│                    │║other          dog              ·            dog.example.com        ·      ·                                    alpha-jump    ║
+│                    │║other          eel              admin        eel.example.com        2222   ·                                    ·             ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+│                    │║                                                                                                                              ║
+└────────────────────┘╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
+┌ Editor <CONFIG>  ln 1 col 1 
+│Host *                                                                                                                                              │
+│    ServerAliveInterval 60                                                                                                                          │
+│                                                                                                                                                    │
+│Host gnu                                                                                                                                            │
+│    HostName gnu.example.com                                                                                                                        │
+│    User carol                                                                                                                                      │
+│                                                                                                                                                    │
+│#-----------------------------------------------------------------------------------------------------#                                             │
+│#                                           section: alpha                                            #                                             │
+│#                                            _       _                                                #                                             │
+│#                                       __ _| |_ __ | |__   __ _                                      #                                             │
+│#                                      / _` | | '_ \| '_ \ / _` |                                     #                                             │
+│#                                     | (_| | | |_) | | | | (_| |                                     #                                             │
+│#                                      \__,_|_| .__/|_| |_|\__,_|                                     #                                             │
+│#                                             |_|                                                     #                                             │
+│#-----------------------------------------------------------------------------------------------------#                                             │
+│                                                                                                                                                    │
+│Host ant                                                                                                                                            │
+│    HostName ant.example.com                                                                                                                        │
+│    User deploy                                                                                                                                     │
+│    Port 2201                                                                                                                                       │
+│    ProxyCommand ssh -W %h:%p gw1                                                                                                                   │
+│                                                                                                                                                    │
+│Host fox                                                                                                                                            │
+│    HostName fox.example.com                                                                                                                        │
+│    User zed                                                                                                                                        │
+│    ProxyCommand corkscrew                                                                                                                          │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ gnu -> carol@gnu.example.com:22                                                                                                                      
+ ?:help  q:quit  Tab:focus  1-7:sort  /:filter  f:column filter  x:clear  a:add  e:edit  d:delete  c:clone  m:move  n:new section  o:editor           

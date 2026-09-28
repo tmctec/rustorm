@@ -125,4 +125,23 @@ impl Theme {
             "_"
         }
     }
+
+    /// Marker before a file whose editor buffer has unsaved edits. Also
+    /// bold, so it reads without the glyph.
+    pub fn dirty(&self) -> &'static str {
+        if self.unicode {
+            "•"
+        } else {
+            "*"
+        }
+    }
+
+    /// Stands for the elided start of a long path.
+    pub fn ellipsis(&self) -> &'static str {
+        if self.unicode {
+            "…"
+        } else {
+            "..."
+        }
+    }
 }

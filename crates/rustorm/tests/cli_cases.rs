@@ -211,7 +211,9 @@ fn json_list_rows_carry_section() {
     assert!(rows.iter().all(|r| r.get("section").is_some()));
     assert_eq!(rows[0]["section"], "data foundry");
     let keys: Vec<&String> = rows[0].as_object().unwrap().keys().collect();
-    assert_eq!(keys.len(), 7);
+    assert_eq!(keys.len(), 8);
+    // D23: every row names its file, on a workspace of one file too.
+    assert!(rows.iter().all(|r| r["file"] == c));
     for cmd in [
         &["show", "vps"][..],
         &["dump"],
@@ -515,4 +517,359 @@ fn add_section_on_an_unsectioned_fixture_then_sections_lists_it_above_the_catch_
     assert_eq!(err(&out), "error: section LAB already exists.\n");
     let out = home.run(&["--config", c, "sections"]);
     assert_eq!(text(&out), "work    0\nhome    0\nlab     0\nother   3\n");
+}
+
+// ----- Included files (docs/cli.md "Included files"): a temp HOME whose
+// ~/.ssh/config includes ~/.ssh/config.d/*, run without --config -----
+
+/// The docs' workspace under a temp HOME: `~/.ssh/config` (Include
+/// `~/.ssh/config.d/*`, `Host *`, github), `config.d/cypress`,
+/// `config.d/df-austin` (section `data foundry`), `config.d/ranch`
+/// (Include `ranch.d/*`) and `ranch.d/lab`.
+fn workspace_home() -> Home {
+    let home = Home::new();
+    for (name, rel) in [
+        ("includes-root", "config"),
+        ("includes-cypress", "config.d/cypress"),
+        ("includes-df-austin", "config.d/df-austin"),
+        ("includes-ranch", "config.d/ranch"),
+        ("includes-lab", "ranch.d/lab"),
+    ] {
+        let dest = home.path().join(".ssh").join(rel);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::copy(fixture(name), dest).unwrap();
+    }
+    home
+}
+
+/// Every file under `~/.ssh`, relative path to bytes.
+fn snapshot(home: &Home) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(dir: &Path, base: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(&p, base, out);
+            } else {
+                let rel = p.strip_prefix(base).unwrap().display().to_string();
+                out.insert(rel, std::fs::read(&p).unwrap());
+            }
+        }
+    }
+    let base = home.path().join(".ssh");
+    let mut out = std::collections::BTreeMap::new();
+    walk(&base, &base, &mut out);
+    out
+}
+
+/// The paths whose bytes differ between two snapshots, or that exist in
+/// only one of them.
+fn changed(
+    before: &std::collections::BTreeMap<String, Vec<u8>>,
+    after: &std::collections::BTreeMap<String, Vec<u8>>,
+) -> Vec<String> {
+    let mut keys: Vec<&String> = before.keys().chain(after.keys()).collect();
+    keys.sort();
+    keys.dedup();
+    keys.into_iter()
+        .filter(|k| before.get(*k) != after.get(*k))
+        .cloned()
+        .collect()
+}
+
+fn ssh_text(home: &Home, rel: &str) -> String {
+    std::fs::read_to_string(home.path().join(".ssh").join(rel)).unwrap()
+}
+
+#[test]
+fn inc_1_list_prints_every_host_under_a_heading_per_file() {
+    let home = workspace_home();
+    let out = home.run(&["list"]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        "\
+~/.ssh/config
+github           -> git@github.com:22
+~/.ssh/config.d/cypress
+cypressPro       -> travis@10.10.0.2:22
+cypressPro-ext   -> travis@cypress.example.com:22
+~/.ssh/config.d/df-austin
+[data foundry]
+db1              -> postgres@db1.example.com:22
+dcaustin-pfsense -> admin@10.20.0.1:22
+~/.ssh/config.d/ranch
+dcevant          -> travis@dcevant.ranch.lan:22
+ranch-nas        -> travis@nas.ranch.lan:22
+~/.ssh/ranch.d/lab
+lab-1            -> travis@10.30.0.5:22
+"
+    );
+    // Shell completion reads `list -n`: every host of the workspace.
+    assert_eq!(
+        text(&home.run(&["list", "-n"])),
+        "github\ncypressPro\ncypressPro-ext\ndb1\ndcaustin-pfsense\ndcevant\nranch-nas\nlab-1\n"
+    );
+    // --section keeps the file that holds it, under its heading.
+    assert_eq!(
+        text(&home.run(&["list", "--section", "data foundry"])),
+        "~/.ssh/config.d/df-austin\n[data foundry]\ndb1              -> postgres@db1.example.com:22\ndcaustin-pfsense -> admin@10.20.0.1:22\n"
+    );
+    assert_eq!(
+        text(&home.run(&["sections"])),
+        "~/.ssh/config.d/df-austin\ndata foundry   2\n"
+    );
+}
+
+#[test]
+fn inc_5_add_with_section_writes_only_the_file_holding_the_section() {
+    let home = workspace_home();
+    let before = snapshot(&home);
+    let out = home.run(&["add", "db2", "postgres@h", "--section", "data foundry"]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        "db2 added to section data foundry in ~/.ssh/config.d/df-austin. Connect with: ssh db2\n"
+    );
+    let after = snapshot(&home);
+    // The backup of a file inside the Include glob is a dot file, so the
+    // glob never loads it (core's backup rule).
+    assert_eq!(
+        changed(&before, &after),
+        ["config.d/.df-austin~", "config.d/df-austin"]
+    );
+    assert_eq!(after["config.d/.df-austin~"], before["config.d/df-austin"]);
+    let df = ssh_text(&home, "config.d/df-austin");
+    assert!(df.contains("section: data foundry") && df.contains("Host db2\n"));
+    assert!(df.find("Host db2").unwrap() > df.find("section: data foundry").unwrap());
+}
+
+#[test]
+fn inc_6_add_without_section_goes_to_the_root() {
+    let home = workspace_home();
+    let before = snapshot(&home);
+    let out = home.run(&["add", "scratch", "root@h"]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        "scratch added in ~/.ssh/config. Connect with: ssh scratch\n"
+    );
+    let after = snapshot(&home);
+    assert_eq!(changed(&before, &after), ["config", "config~"]);
+    let root = ssh_text(&home, "config");
+    // An unsectioned root: the new host is its last entry.
+    assert_eq!(root.rfind("Host "), root.find("Host scratch\n"), "{root}");
+}
+
+/// `text` with the sections of `rustorm add-section NAME` applied, made by
+/// running rustorm on a scratch copy outside the workspace.
+fn with_section(home: &Home, text: &str, name: &str) -> String {
+    let scratch = home.file("scratch.conf", text);
+    let out = home.run(&["-c", scratch.to_str().unwrap(), "add-section", name]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    let result = std::fs::read_to_string(&scratch).unwrap();
+    std::fs::remove_file(&scratch).unwrap();
+    let _ = std::fs::remove_file(home.path().join("scratch.conf~"));
+    result
+}
+
+#[test]
+fn inc_9_a_section_in_two_files_is_ambiguous_and_writes_nothing() {
+    let home = workspace_home();
+    for rel in ["config.d/cypress", "config.d/ranch"] {
+        let sectioned = with_section(&home, &ssh_text(&home, rel), "lab");
+        std::fs::write(home.path().join(".ssh").join(rel), sectioned).unwrap();
+    }
+    let before = snapshot(&home);
+    let out = home.run(&["add", "x", "root@h", "--section", "lab"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        err(&out),
+        "error: section lab exists in ~/.ssh/config.d/cypress and ~/.ssh/config.d/ranch. Say which with --file.\n"
+    );
+    assert_eq!(text(&out), "");
+    assert!(changed(&before, &snapshot(&home)).is_empty());
+    // --file settles it.
+    let out = home.run(&["add", "x", "root@h", "--section", "lab", "--file", "ranch"]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert!(ssh_text(&home, "config.d/ranch").contains("Host x\n"));
+    assert!(!ssh_text(&home, "config.d/cypress").contains("Host x\n"));
+}
+
+#[test]
+fn inc_10_set_writes_the_file_holding_the_host() {
+    let home = workspace_home();
+    let before = snapshot(&home);
+    let out = home.run(&["set", "cypressPro-ext", "Port", "22"]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        "cypressPro-ext updated in ~/.ssh/config.d/cypress.\n"
+    );
+    assert_eq!(
+        changed(&before, &snapshot(&home)),
+        ["config.d/.cypress~", "config.d/cypress"]
+    );
+    assert!(ssh_text(&home, "config.d/cypress").contains("    Port 22\n"));
+    // The dot backup is not loaded on the next run: no duplicate warning.
+    let out = home.run(&["set", "cypressPro-ext", "Port", "23"]);
+    assert_eq!(err(&out), "");
+    assert_eq!(text(&home.run(&["includes"])).lines().last(), Some("5 files, 8 hosts."));
+}
+
+#[test]
+fn inc_11_move_between_files_backs_up_both_and_names_both() {
+    let home = workspace_home();
+    let before = snapshot(&home);
+    let out = home.run(&["move", "dcevant", "--section", "data foundry"]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        "dcevant moved from ~/.ssh/config.d/ranch to section data foundry in ~/.ssh/config.d/df-austin.\n"
+    );
+    assert_eq!(
+        changed(&before, &snapshot(&home)),
+        [
+            "config.d/.df-austin~",
+            "config.d/.ranch~",
+            "config.d/df-austin",
+            "config.d/ranch"
+        ]
+    );
+    assert!(!ssh_text(&home, "config.d/ranch").contains("dcevant"));
+    assert!(ssh_text(&home, "config.d/df-austin").contains("Host dcevant\n    HostName dcevant.ranch.lan"));
+}
+
+#[test]
+fn inc_13_file_resolves_a_bare_name_a_path_and_refuses_an_unknown_name() {
+    let home = workspace_home();
+    // Bare name: the loaded file with that name.
+    let out = home.run(&["add", "x1", "root@h", "--file", "cypress"]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert!(ssh_text(&home, "config.d/cypress").contains("Host x1\n"));
+    assert!(text(&out).contains("~/.ssh/config.d/cypress"), "{}", text(&out));
+    // A path, used as given.
+    let ranch = home.path().join(".ssh/config.d/ranch");
+    let out = home.run(&["-f", ranch.to_str().unwrap(), "add", "x2", "root@h"]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert!(ssh_text(&home, "config.d/ranch").contains("Host x2\n"));
+    // `config` names the root.
+    let out = home.run(&["add", "x3", "root@h", "--file", "config"]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert!(ssh_text(&home, "config").contains("Host x3\n"));
+    // Unknown name: exit 1, nothing written.
+    let before = snapshot(&home);
+    let out = home.run(&["add", "x4", "root@h", "--file", "nas"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(err(&out), "error: no such file nas in the workspace.\n");
+    assert!(changed(&before, &snapshot(&home)).is_empty());
+    // dump --file prints that file; --file on list is a usage error.
+    let out = home.run(&["dump", "--file", "df-austin"]);
+    assert_eq!(out.stdout, std::fs::read(home.path().join(".ssh/config.d/df-austin")).unwrap());
+    assert_eq!(home.run(&["list", "--file", "cypress"]).status.code(), Some(2));
+}
+
+#[test]
+fn inc_15_check_reports_the_duplicate_the_backup_and_the_include_in_host_star() {
+    let home = workspace_home();
+    std::fs::write(
+        home.path().join(".ssh/config"),
+        "Host *\n    ServerAliveInterval 60\n    Include ~/.ssh/config.d/*\n\nHost github\n    HostName github.com\n    User git\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join(".ssh/config.d/df-austin.bak.20260628232757"),
+        "Host dcaustin-pfsense\n    HostName 10.20.0.1\n    User admin\n",
+    )
+    .unwrap();
+    let before = snapshot(&home);
+    let out = home.run(&["check"]);
+    assert_eq!(out.status.code(), Some(1), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        "\
+dcaustin-pfsense: defined in ~/.ssh/config.d/df-austin and ~/.ssh/config.d/df-austin.bak.20260628232757; ssh uses the first
+Include ~/.ssh/config.d/*: loads ~/.ssh/config.d/df-austin.bak.20260628232757, which looks like a backup
+Include ~/.ssh/config.d/*: inside Host * in ~/.ssh/config; treated as global
+3 problems in 9 hosts.
+"
+    );
+    assert!(changed(&before, &snapshot(&home)).is_empty());
+}
+
+#[test]
+fn inc_16_includes_lists_the_workspace_in_text_and_json() {
+    let home = workspace_home();
+    let out = home.run(&["includes"]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        "\
+~/.ssh/config: Include ~/.ssh/config.d/*
+  ~/.ssh/config.d/cypress    2 hosts
+  ~/.ssh/config.d/df-austin  2 hosts
+  ~/.ssh/config.d/ranch      2 hosts
+    ~/.ssh/config.d/ranch: Include ranch.d/*
+      ~/.ssh/ranch.d/lab     1 host
+5 files, 8 hosts.
+"
+    );
+    let ssh = home.path().join(".ssh").display().to_string();
+    let out = home.run(&["--json", "includes"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        text(&out),
+        format!(
+            "[{{\"pattern\":\"~/.ssh/config.d/*\",\"from\":\"{ssh}/config\",\"file\":\"{ssh}/config.d/cypress\",\"hosts\":2,\"nested\":[]}},\
+{{\"pattern\":\"~/.ssh/config.d/*\",\"from\":\"{ssh}/config\",\"file\":\"{ssh}/config.d/df-austin\",\"hosts\":2,\"nested\":[]}},\
+{{\"pattern\":\"~/.ssh/config.d/*\",\"from\":\"{ssh}/config\",\"file\":\"{ssh}/config.d/ranch\",\"hosts\":2,\"nested\":[\
+{{\"pattern\":\"ranch.d/*\",\"from\":\"{ssh}/config.d/ranch\",\"file\":\"{ssh}/ranch.d/lab\",\"hosts\":1,\"nested\":[]}}]}}]\n"
+        )
+    );
+    // A root without Include.
+    std::fs::write(home.path().join(".ssh/config"), MOVE_FIXTURE).unwrap();
+    let out = home.run(&["includes"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(text(&out), "no Include lines in ~/.ssh/config\n");
+    assert_eq!(text(&home.run(&["--json", "includes"])), "[]\n");
+}
+
+#[test]
+fn inc_17_every_json_row_carries_its_file() {
+    let home = workspace_home();
+    std::fs::write(
+        home.path().join(".ssh/config.d/df-austin.bak.20260628232757"),
+        "Host dcaustin-pfsense\n    HostName 10.20.0.1\n",
+    )
+    .unwrap();
+    let ssh = home.path().join(".ssh");
+    let abs = |rel: &str| ssh.join(rel).display().to_string();
+    let json = |args: &[&str]| -> serde_json::Value {
+        let out = home.run(args);
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{args:?}: {e}"))
+    };
+    let rows = json(&["--json", "list"]);
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 9);
+    let file_of = |rows: &[serde_json::Value], name: &str| -> String {
+        rows.iter().find(|r| r["name"] == name).unwrap()["file"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(file_of(rows, "github"), abs("config"));
+    assert_eq!(file_of(rows, "cypressPro"), abs("config.d/cypress"));
+    assert_eq!(file_of(rows, "lab-1"), abs("ranch.d/lab"));
+    let rows = json(&["--json", "search", "^d"]);
+    let rows = rows.as_array().unwrap();
+    assert!(rows.iter().all(|r| r["file"].is_string()));
+    assert_eq!(file_of(rows, "db1"), abs("config.d/df-austin"));
+    assert_eq!(file_of(rows, "dcevant"), abs("config.d/ranch"));
+    let report = json(&["--json", "check"]);
+    let problems = report["problems"].as_array().expect("problems array");
+    assert!(!problems.is_empty());
+    assert!(problems.iter().all(|p| p["file"].is_string()), "{report}");
+    let sections = json(&["--json", "sections"]);
+    assert_eq!(sections[0]["file"], abs("config.d/df-austin"));
+    let shown = json(&["--json", "show", "lab-1"]);
+    assert_eq!(shown[0]["file"], abs("ranch.d/lab"));
 }

@@ -1,0 +1,27 @@
+#!/usr/bin/env expect -f
+# inc-tui-4 on a real pty: draw the no-Include fixture at 40x150, wait for
+# the table, press q. The caller slices the alternate-screen bytes out of
+# stdout and compares them with the pre-plan golden frame.
+# Usage: expect -f pty_frame.exp <rustorm-tui binary> <config fixture>
+set timeout 10
+set bin [lindex $argv 0]
+set cfg [lindex $argv 1]
+spawn script -q /dev/null sh -c "stty rows 40 cols 150; $bin --config '$cfg'; echo EXIT=\$?"
+expect {
+    "Hosts 3/3" {}
+    timeout { puts "\nFAIL: table not drawn"; exit 2 }
+}
+foreach h {vps db web ServerAliveInterval} {
+    expect {
+        $h {}
+        timeout { puts "\nFAIL: $h not drawn"; exit 2 }
+    }
+}
+sleep 0.3
+send "q"
+expect {
+    -re {EXIT=([0-9]+)} {}
+    timeout { puts "\nFAIL: no exit after q"; exit 3 }
+}
+expect eof
+exit 0

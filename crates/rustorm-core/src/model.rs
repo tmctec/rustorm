@@ -769,6 +769,27 @@ impl Config {
         self.hosts().into_iter().find(|h| h.is_defaults())
     }
 
+    /// The 1-based line number of the `Host` line of the host at `loc`, for
+    /// editors that jump to it.
+    pub fn host_line(&self, loc: HostLocation) -> usize {
+        let mut n = 0;
+        let parts = std::iter::once(None).chain((0..self.sections.len()).map(Some));
+        for section in parts {
+            if let Some(i) = section {
+                n += self.sections[i].banner.lines.len();
+            }
+            for (index, e) in self.entries(section).iter().enumerate() {
+                if section == loc.section && index == loc.index {
+                    if let Entry::Host(h) = e {
+                        return n + h.leading.len() + 1;
+                    }
+                }
+                n += e.lines().count();
+            }
+        }
+        n
+    }
+
     /// The section name of the host at `loc`, `None` for the preamble.
     pub fn section_name(&self, loc: HostLocation) -> Option<&str> {
         loc.section.map(|i| self.sections[i].name())

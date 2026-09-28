@@ -35,8 +35,11 @@ Versus ssh-config: ssh-config proved that a config-file tool can be strict about
 - A file a person edited by hand keeps their formatting and comments after the tool next writes to it.
 - A separate GUI project can drive every read operation through a machine-readable output mode instead of scraping text.
 
+## Settled questions
+
+- `Include` and `Match`: the tool follows `Include` the way ssh does and treats the root and every file it loads as one workspace, editing each host in the file that holds it (D21 in `cli.md`). `Match` blocks stay opaque.
+
 ## Open questions
 
-- Does the tool need to understand `Include` and `Match` directives, or is treating them as opaque acceptable for v1?
 - What should a command that removes every host at once actually do: prompt, require an explicit confirmation flag, refuse outright, or something else?
 - Should every write make a backup automatically and silently, the way one reference tool does, or should backups stay an explicit, user-invoked step, the way the other does?

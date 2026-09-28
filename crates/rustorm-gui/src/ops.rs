@@ -1,6 +1,6 @@
 //! The writes the GUI makes, each a sequence of `rustorm_core` operations.
 
-use rustorm_core::{AddSpec, CloneSpec, Config, EditSpec, Env, HostSelector};
+use rustorm_core::{AddSpec, CloneSpec, EditSpec, Env, HostSelector, Workspace};
 
 /// One write the user asked for from the Hosts tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,9 +79,20 @@ impl Op {
         }
     }
 
-    /// Applies the operation to `config` through the core. On `Err` the
-    /// caller discards `config`, so a partial sequence never reaches disk.
-    pub fn apply(&self, config: &mut Config, env: &Env) -> rustorm_core::Result<Outcome> {
+    /// Applies the operation to `ws` through the core, which routes each
+    /// write to its file. On `Err` the caller discards `ws`, so a partial
+    /// sequence never reaches disk. On a workspace of one file the status
+    /// messages are the GUI's own; on several they are the core's, which
+    /// name the file written.
+    pub fn apply(&self, ws: &mut Workspace, env: &Env) -> rustorm_core::Result<Outcome> {
+        let multi = ws.is_multi();
+        let said = |messages: Vec<String>, single: String| {
+            if multi {
+                messages.join(" ")
+            } else {
+                single
+            }
+        };
         match self {
             Op::Add {
                 name,
@@ -89,7 +100,7 @@ impl Op {
                 identity,
                 section,
             } => {
-                let placed = config.add(
+                let change = ws.add(
                     &AddSpec {
                         name: name.trim().to_string(),
                         uri: uri.trim().to_string(),
@@ -97,13 +108,16 @@ impl Op {
                         options: Vec::new(),
                         section: non_empty(section),
                     },
+                    None,
                     env,
                 )?;
+                let placed = change.value;
+                let single = match &placed.section {
+                    Some(s) => format!("{} added to section {s}.", placed.name),
+                    None => format!("{} added.", placed.name),
+                };
                 Ok(Outcome {
-                    message: match &placed.section {
-                        Some(s) => format!("{} added to section {s}.", placed.name),
-                        None => format!("{} added.", placed.name),
-                    },
+                    message: said(change.messages, single),
                     select: Some(placed.name),
                 })
             }
@@ -114,14 +128,17 @@ impl Op {
                 identity,
                 section,
             } => {
-                let loc = config
+                let wl = ws
                     .find_host(original)
                     .ok_or_else(|| rustorm_core::Error::EditTargetMissing(original.clone()))?;
-                let current = config.section_name(loc).map(str::to_string);
-                let mut target = config.host(loc).primary();
+                let current = ws.files[wl.file]
+                    .config
+                    .section_name(wl.loc)
+                    .map(str::to_string);
+                let mut target = ws.host(wl).primary();
                 let new_name = name.trim();
                 if new_name != target {
-                    config.move_host(&target, Some(new_name), None)?;
+                    ws.move_host(&target, Some(new_name), None, None)?;
                     target = new_name.to_string();
                 }
                 let section = non_empty(section).filter(|s| {
@@ -131,7 +148,7 @@ impl Op {
                 });
                 let identity = non_empty(identity);
                 let remove_identity = identity.is_none();
-                config.edit(
+                let change = ws.edit(
                     &EditSpec {
                         name: target.clone(),
                         uri: uri.trim().to_string(),
@@ -139,34 +156,41 @@ impl Op {
                         options: Vec::new(),
                         section,
                     },
+                    None,
                     env,
                 )?;
                 if remove_identity {
-                    config.unset(
+                    ws.unset(
                         &HostSelector::Name(target.clone()),
                         &["IdentityFile".to_string()],
+                        None,
                     )?;
                 }
                 Ok(Outcome {
-                    message: format!("{target} updated."),
+                    message: said(change.messages, format!("{target} updated.")),
                     select: Some(target),
                 })
             }
             Op::Delete(name) => {
-                let deleted = config.delete(std::slice::from_ref(name))?;
+                let change = ws.delete(std::slice::from_ref(name), None)?;
+                let single = format!("{} deleted.", change.value.join(", "));
                 Ok(Outcome {
-                    message: format!("{} deleted.", deleted.join(", ")),
+                    message: said(change.messages, single),
                     select: None,
                 })
             }
             Op::Clone { source, new_name } => {
-                let placed = config.clone_host(&CloneSpec {
-                    source: source.clone(),
-                    new_name: new_name.trim().to_string(),
-                    ..CloneSpec::default()
-                })?;
+                let change = ws.clone_host(
+                    &CloneSpec {
+                        source: source.clone(),
+                        new_name: new_name.trim().to_string(),
+                        ..CloneSpec::default()
+                    },
+                    None,
+                )?;
+                let placed = change.value;
                 Ok(Outcome {
-                    message: format!("{} added.", placed.name),
+                    message: said(change.messages, format!("{} added.", placed.name)),
                     select: Some(placed.name),
                 })
             }
@@ -174,13 +198,15 @@ impl Op {
                 let section = non_empty(section).ok_or_else(|| {
                     rustorm_core::Error::Usage("give a section name.".to_string())
                 })?;
-                let moved = config.move_host(name, None, Some(&section))?;
+                let change = ws.move_host(name, None, Some(&section), None)?;
+                let moved = change.value;
+                let single = format!(
+                    "{} moved to section {}.",
+                    moved.new_name,
+                    moved.section.clone().unwrap_or(section)
+                );
                 Ok(Outcome {
-                    message: format!(
-                        "{} moved to section {}.",
-                        moved.new_name,
-                        moved.section.unwrap_or(section)
-                    ),
+                    message: said(change.messages, single),
                     select: Some(moved.new_name),
                 })
             }
@@ -188,15 +214,16 @@ impl Op {
                 let name = non_empty(name).ok_or_else(|| {
                     rustorm_core::Error::Usage("a section name is required.".to_string())
                 })?;
-                let added = config.add_section(&name, None)?;
+                let change = ws.add_section(&name, None, None)?;
+                let single = match &change.value.catch_all {
+                    Some((catch_all, n)) => format!(
+                        "section {name} added; {catch_all} created with {n} host{}.",
+                        if *n == 1 { "" } else { "s" }
+                    ),
+                    None => format!("section {name} added."),
+                };
                 Ok(Outcome {
-                    message: match added.catch_all {
-                        Some((catch_all, n)) => format!(
-                            "section {name} added; {catch_all} created with {n} host{}.",
-                            if n == 1 { "" } else { "s" }
-                        ),
-                        None => format!("section {name} added."),
-                    },
+                    message: said(change.messages, single),
                     select: None,
                 })
             }
@@ -204,7 +231,8 @@ impl Op {
     }
 }
 
-/// The text of the host `name` answers to in `config`, `None` when absent.
-pub fn host_text(config: &Config, name: &str) -> Option<String> {
-    config.find_host(name).map(|l| config.host(l).text())
+/// The text of the first host `name` answers to in `ws`, `None` when
+/// absent.
+pub fn host_text(ws: &Workspace, name: &str) -> Option<String> {
+    ws.find_host(name).map(|wl| ws.host(wl).text())
 }

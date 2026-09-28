@@ -8,4 +8,4 @@ pub mod highlight;
 pub mod ops;
 pub mod rows;
 
-pub use app::{App, Dialog, Form, FormMode, Tab, DISCARD_LABEL};
+pub use app::{App, Dialog, Form, FormMode, Tab, DISCARD_ALL_LABEL, DISCARD_LABEL};
