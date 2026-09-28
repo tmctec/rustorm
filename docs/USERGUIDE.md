@@ -92,19 +92,22 @@ rustorm dump --file cypress                             # print one included fil
 
 | Key | Action |
 |---|---|
-| `↑` `↓` or `j` `k` | Move the selection |
+| `↑` `↓` or `j` `k` | Move the selection; the editor below follows, showing the selected host |
 | `Tab` / `Shift-Tab` | Cycle focus between sections, table and editor |
 | `1` … `7` | Sort by section, host, user, hostname, port, proxy, jump; press again to reverse; `0` restores file order |
 | `/` | Filter every column; `f` then a column number filters one column; `x` clears filters |
 | `Enter` on a section | Show only that section |
-| `a` `e` `d` `c` `m` | Add, edit, delete (with confirmation), clone, move or rename the selected host |
+| `Enter` on a host | Open its settings: every keyword it can set, grouped, saved in one write |
+| `a` `e` `d` `c` `m` | Add, quick-edit (URI, identity, section), delete (with confirmation), clone, move or rename the selected host |
 | `R` on a section | Rename the section |
 | `n` | Create an empty section |
-| `F` | Focus the file list (shown when the config includes other files); `Enter` opens that file in the editor |
+| `F` | Focus the file list (shown when the config includes other files); the editor shows the highlighted file, and `Enter` moves into it |
 | `o` | Open the editor at the selected host, in the file that holds it |
 | `Ctrl-S` / `Ctrl-R` | In the editor: save, or discard and reload |
 | `Esc` | Cancel a form or prompt, or leave the editor |
 | `q` | Quit; asks first if the editor has unsaved edits, listing every unsaved file |
+
+**Settings form.** `Enter` on a host lists every ssh_config keyword in six groups: Connection, Authentication, Forwarding, Proxy, Multiplexing and Advanced. Yes/no and fixed-choice keys such as `Compression` or `ControlMaster` change with `Space` or the arrow keys, including back to not set. Other keys are typed. `Ctrl-U` clears one. Values your `Host *` block supplies show dimmed. `Enter` checks each value (a port must be a number, `StrictHostKeyChecking` one of its documented words) and saves every change at once with a backup; `Esc` cancels.
 
 Every table column sorts and filters, including proxy (`ProxyCommand`) and jump (`ProxyJump`). Hosts without the sorted key sort last. Filters combine: a section filter and a user filter together show only hosts matching both. With included files the table gains a file column and the editor keeps one buffer per file; `Ctrl-S` saves only the file shown. Full key list: `docs/tui.md`.
 
@@ -113,7 +116,8 @@ Every table column sorts and filters, including proxy (`ProxyCommand`) and jump 
 `rustorm-gui` opens a window with the sections in a sidebar, a Hosts tab and an Editor tab.
 
 - Click a column header to sort; click again to reverse. The filter box above each column narrows the rows, and filters combine.
-- Select a row to edit it in the detail panel: name, connection URI, identity file and section. Clearing the identity file removes it from the host. Save writes the file; Delete asks first.
+- Select a row, or move with `↑` `↓`, to edit it in the detail panel: name, connection URI, identity file and section. Clearing the identity file removes it from the host. Save writes the file; Delete asks first. The Editor tab follows the selection, opening on the selected host's `Host` line.
+- **All settings** in the detail panel lists every keyword the host can set, grouped the same way as the terminal UI. Yes/no and fixed-choice keys are drop-downs, other keys are text fields, repeatable keys like `LocalForward` get a field per value, and a bad value is flagged under its field. **Save settings** writes every change at once.
 - Add opens the same form empty. Clone and Move to section act on the selected host.
 - New section… under the sidebar creates an empty section; on a file without sections it also creates the catch-all.
 - With included files the sidebar lists every file with its host count, the table gains a file column, and the editor has a file selector; Save writes only the selected file. Show in Editor on a host opens its file at its `Host` line. Quitting with several unsaved files lists them in one dialog with Save All.

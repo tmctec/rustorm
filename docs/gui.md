@@ -1,6 +1,6 @@
 # rustorm-gui — desktop interface
 
-`rustorm-gui` is the egui desktop interface to rustorm. It lists, adds, edits, clones, moves and deletes hosts, creates sections, and it edits the raw config file with ssh_config syntax highlighting. Every read and write goes through `rustorm-core`, so hand edits, comments and banners survive exactly as they do with the CLI (F-43).
+`rustorm-gui` is the egui desktop interface to rustorm. It lists, adds, edits, clones, moves and deletes hosts, edits every keyword a host sets, creates sections, and it edits the raw config file with ssh_config syntax highlighting. Every read and write goes through `rustorm-core`, so hand edits, comments and banners survive exactly as they do with the CLI (F-43).
 
 ```
 rustorm-gui [--config <FILE>]
@@ -36,7 +36,7 @@ The Hosts tab shows one row per host from the core's `list`. `Host *` is never a
 - **Filter.** A text box sits under each column header, plus a global filter above the table that matches any column. Each filter keeps rows whose displayed value, inherited ones included, contains the text, case-insensitively. Filters AND together. Clearing a box, or Clear filters, restores the rows they hid.
 - **Empty states.** When filters hide every row the table body reads "no hosts match" with a Clear filters button. A config without hosts reads "no hosts yet" with an Add Host button.
 - **Missing values** show an em dash in weak text.
-- **Selection.** Clicking a row selects it and opens it in the detail panel. Up and Down move the selection.
+- **Selection.** Clicking a row selects it and opens it in the detail panel. Up and Down move the selection when no text field has focus. Selecting a host also points the editor at it: the editor selects the file that holds the host and, when the Editor tab next shows, puts the cursor on its `Host` line. The Hosts tab stays in front. Selecting the host that is already selected, switching tabs, or Esc leaves the editor's cursor where it is.
 
 ## Detail panel
 
@@ -49,7 +49,14 @@ The detail panel sits to the right of the table.
 - **Clone.** Asks for the new name and runs `clone`; the copy lands in the source's section with its `HostName` rewritten, and the new host becomes the selection.
 - **Move to section.** A section picker with the existing sections plus a new-name field runs `move` with `--section`.
 - **Errors.** A refused operation (name exists, invalid URI, invalid name) shows the core's message inline under the form in the error color. The fields keep their input and the file is unchanged.
-- **Editor guard.** While the editor has unsaved text, Save, Delete, Clone and Move are disabled and the panel reads "Save or discard the editor first".
+- **All settings.** Under the actions, a collapsible All settings section lists every keyword the host can set in six collapsible groups — Connection, Authentication, Forwarding, Proxy, Multiplexing, Advanced — prefilled with the host's own values; changed rows carry `•`.
+  - Yes/no keywords and fixed choices use a drop-down with "not set" and each value, e.g. `ControlMaster`: not set, `no`, `yes`, `ask`, `auto`, `autoask`. An unset key whose value comes from `Host *` reads "— (60 from Host *)".
+  - Other keywords are text fields; a value inherited from `Host *` shows as the hint. Keywords that also take free text, such as `ForwardAgent` (a socket path) or `ControlPersist` (a duration), have a ▾ menu of their documented words.
+  - A repeatable keyword (`IdentityFile`, `LocalForward`, `RemoteForward`, `DynamicForward`, `CertificateFile`, `SendEnv`, `SetEnv`) shows one field per value plus an empty one; − clears a value.
+  - A value that does not fit its keyword shows the problem under the field, e.g. "Port must be a port from 1 to 65535", and Save settings stays disabled.
+  - **Save settings** writes every change in one write with one backup; a cleared key is removed; a value for a key `Host *` sets gives the host its own line. It is disabled while nothing changed. **Reset** restores the loaded values. Selecting another host or Cancel drops unsaved changes.
+  - Keywords rustorm does not know stay in the file and do not show here; edit them in the editor.
+- **Editor guard.** While the editor has unsaved text, Save, Delete, Clone, Move and All settings are disabled and the panel reads "Save or discard the editor first".
 - Every successful write backs the file up to `<config>~`, re-reads the table, and reports the result in the status bar.
 
 ## Editor
@@ -57,6 +64,7 @@ The detail panel sits to the right of the table.
 - **Widget.** An egui `TextEdit::multiline` in monospace, filling the tab, with a custom `layouter`. The layouter lexes the text with the core's `Lexer` line by line (banner state carried across lines) and builds a `LayoutJob` with one color per `SpanKind`.
 - **Colors.** Comment, Banner, HostKeyword, HostName, Alias, Key, Value, ProxyCommand, ProxyJump and Unknown each have their own color; ProxyCommand and ProxyJump differ from each other and from Value. Two palettes exist, one for light and one for dark appearance, chosen from the current egui visuals.
 - **Load.** The editor opens with the file text. It reloads from disk after every form write, and on Reload from Disk.
+- **Follows the selection.** The editor shows the file holding the selected host, cursor on its `Host` line (see Host table, Selection).
 - **Save.** Save (Cmd/Ctrl+S) parses the buffer with the core, sorts each section's hosts, and writes it through the core with the backup to `<config>~`. Untouched lines stay byte-identical.
 - **Invalid edit.** When a line does not parse (a `Host` line with no name, a key without a value) the save is refused with "line N: cannot parse: <text>" and the file is unchanged.
 - **Discard.** Discard Changes restores the buffer from the file on disk.
@@ -82,7 +90,7 @@ Cmd on macOS, Ctrl on Linux and Windows.
 
 On a workspace of several files (see `cli.md`, Included files) the GUI shows every file and edits them one at a time. On a workspace of one file none of this appears and the window is as described above.
 
-- **Sidebar.** Below the sections, a Files list: the root first, then every included file in load order, each with its host count and a `•` while it has unsaved edits. Selecting a file shows only its hosts, ANDed with the other filters, and selects it in the editor; a second click clears it. An unreadable file shows "cannot read" in weak text and cannot be selected. The section rows show every file's sections; a section name held by two files shows once per file, with the file name in weak text.
+- **Sidebar.** Below the sections, a Files list: the root first, then every included file in load order, each with its host count and a `•` while it has unsaved edits. Selecting a file shows only its hosts, ANDed with the other filters, and selects it in the editor; a second click clears the filter and leaves the editor on that file. An unreadable file shows "cannot read" in weak text and cannot be selected. The section rows show every file's sections; a section name held by two files shows once per file, with the file name in weak text.
 - **Host table.** A **file** column comes first, showing the file name of the file that holds the host. It sorts and filters like the other columns.
 - **Editor.** A file selector above the editor lists the files in load order, with `•` on each file with unsaved edits. The editor holds one buffer per file; switching files keeps each buffer's text and cursor. **Show in Editor** in the detail panel opens the host in the editor: it selects the file that holds it and puts the cursor on its `Host` line.
 - **Save.** Save (Cmd/Ctrl+S) writes only the selected file, after its own backup (see `cli.md`, Included files: `<file>~`, or `<dir>/.<name>~` when an `Include` pattern would load `<file>~`). Discard Changes and Reload from Disk act on the selected file.
