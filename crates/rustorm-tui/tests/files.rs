@@ -579,3 +579,242 @@ fn tab_cycle_includes_the_file_list_first() {
     assert!(s.contains("file list"), "{s}");
     assert!(s.contains("1-8"), "{s}");
 }
+
+// ----- the editor follows the browsing panes (R-editor-follows) -----
+
+fn host_line(text: &str, name: &str) -> usize {
+    text.lines()
+        .position(|l| l.trim() == format!("Host {name}"))
+        .unwrap()
+}
+
+/// follow-tui-1: moving the file-list highlight shows that file at once;
+/// focus stays on the list.
+#[test]
+fn follow_tui_1_file_list_highlight_shows_the_file() {
+    let m = Multi::new();
+    let mut app = m.app();
+    press(&mut app, 'F');
+    press(&mut app, 'j');
+    assert_eq!(app.shown_file(), m.cypress.as_path());
+    assert_eq!(app.focus(), rustorm_tui::Focus::Files);
+    app.handle(key(KeyCode::Down));
+    assert_eq!(app.shown_file(), m.ranch.as_path());
+    assert_eq!(app.focus(), rustorm_tui::Focus::Files);
+    let s = screen(&mut app);
+    let title = s.lines().find(|l| l.contains("Editor ")).unwrap();
+    assert!(title.contains("ranch"), "{title}");
+}
+
+/// follow-tui-2: every movement key follows.
+#[test]
+fn follow_tui_2_every_movement_key_follows() {
+    let m = Multi::new();
+    let mut app = m.app();
+    press(&mut app, 'F');
+    press(&mut app, 'G');
+    assert_eq!(app.shown_file(), m.ranch.as_path());
+    press(&mut app, 'k');
+    assert_eq!(app.shown_file(), m.cypress.as_path());
+    press(&mut app, 'g');
+    assert_eq!(app.shown_file(), m.root.as_path());
+    app.handle(key(KeyCode::End));
+    assert_eq!(app.shown_file(), m.ranch.as_path());
+    app.handle(key(KeyCode::Up));
+    assert_eq!(app.shown_file(), m.cypress.as_path());
+    app.handle(key(KeyCode::Home));
+    assert_eq!(app.shown_file(), m.root.as_path());
+    assert_eq!(app.focus(), rustorm_tui::Focus::Files);
+}
+
+/// follow-tui-3: highlighting an unreadable file keeps the previous file
+/// and says nothing until Enter.
+#[test]
+fn follow_tui_3_unreadable_highlight_keeps_the_previous_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let m = Multi::new();
+    let private = m.dir.path().join("config.d/private");
+    std::fs::write(&private, "Host secret\n").unwrap();
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&private).is_ok() {
+        return; // running as root
+    }
+    let mut app = m.app();
+    press(&mut app, 'F');
+    press(&mut app, 'j');
+    assert_eq!(app.shown_file(), m.cypress.as_path());
+    press(&mut app, 'j');
+    assert_eq!(app.shown_file(), m.cypress.as_path());
+    assert_eq!(app.message(), None);
+    app.handle(key(KeyCode::Enter));
+    assert!(app.message().unwrap().starts_with("Error: Cannot open "));
+    press(&mut app, 'j');
+    assert_eq!(app.shown_file(), m.ranch.as_path());
+}
+
+/// follow-tui-4: browsing away and back keeps a buffer's edits and cursor.
+#[test]
+fn follow_tui_4_browsing_keeps_edits_and_cursor() {
+    let m = Multi::new();
+    let mut app = m.app();
+    open_file(&mut app, 0);
+    typ(&mut app, "# root edit\n");
+    app.handle(key(KeyCode::Down));
+    let (text, cursor) = (app.editor_text(), app.editor_cursor());
+    app.handle(key(KeyCode::Esc));
+    press(&mut app, 'F');
+    press(&mut app, 'j');
+    press(&mut app, 'j');
+    assert_eq!(app.shown_file(), m.ranch.as_path());
+    press(&mut app, 'g');
+    assert_eq!(app.shown_file(), m.root.as_path());
+    assert_eq!(app.editor_text(), text);
+    assert_eq!(app.editor_cursor(), cursor);
+    assert!(app.is_editor_modified());
+}
+
+/// follow-tui-5: Enter on a file still shows it and focuses the editor.
+#[test]
+fn follow_tui_5_enter_on_a_file_focuses_the_editor() {
+    let m = Multi::new();
+    let mut app = m.app();
+    open_file(&mut app, 2);
+    assert_eq!(app.shown_file(), m.ranch.as_path());
+    assert_eq!(app.focus(), rustorm_tui::Focus::Editor);
+}
+
+/// follow-tui-6: a single-file workspace has no file list; browsing the
+/// table stays in the one file, cursor on each host's Host line.
+#[test]
+fn follow_tui_6_single_file_follows_within_the_file() {
+    let f = Fixture::new(&three_hosts());
+    let mut app = f.app();
+    assert!(!app.is_multi());
+    press(&mut app, 'F');
+    assert_eq!(app.focus(), rustorm_tui::Focus::Table);
+    let text = f.read();
+    for name in ["web", "db"] {
+        select(&mut app, name);
+        assert_eq!(app.shown_file(), f.path.as_path());
+        assert_eq!(app.editor_cursor(), (host_line(&text, name), 0));
+    }
+}
+
+/// follow-tui-7: moving to a host in an included file shows that file at
+/// the host's Host line; focus stays on the table.
+#[test]
+fn follow_tui_7_host_selection_shows_its_file_and_line() {
+    let m = Multi::new();
+    let mut app = m.app();
+    select(&mut app, "ranch-nas");
+    assert_eq!(app.focus(), rustorm_tui::Focus::Table);
+    assert_eq!(app.shown_file(), m.ranch.as_path());
+    assert_eq!(
+        app.editor_cursor(),
+        (host_line(&read(&m.ranch), "ranch-nas"), 0)
+    );
+    select(&mut app, "cypressPro");
+    assert_eq!(app.shown_file(), m.cypress.as_path());
+    assert_eq!(
+        app.editor_cursor(),
+        (host_line(&read(&m.cypress), "cypressPro"), 0)
+    );
+}
+
+/// follow-tui-8: G, g, k, a sort and a filter all move the editor to the
+/// newly selected host.
+#[test]
+fn follow_tui_8_every_selection_change_follows() {
+    let m = Multi::new();
+    let mut app = m.app();
+    let check = |app: &rustorm_tui::App| {
+        let name = app.selected().unwrap().to_string();
+        let text = app.editor_text();
+        assert_eq!(app.editor_cursor(), (host_line(&text, &name), 0), "{name}");
+    };
+    press(&mut app, 'G');
+    check(&app);
+    press(&mut app, 'k');
+    check(&app);
+    press(&mut app, 'g');
+    check(&app);
+    // Sort by host descending: the first row changes.
+    press(&mut app, '3');
+    press(&mut app, '3');
+    assert_eq!(app.selected(), Some("ranch-nas"));
+    check(&app);
+    press(&mut app, '/');
+    typ(&mut app, "dcevant\n");
+    assert_eq!(app.selected(), Some("dcevant"));
+    assert_eq!(app.shown_file(), m.ranch.as_path());
+    check(&app);
+}
+
+/// follow-tui-9: the cursor lands on the Host line in the buffer, not on
+/// disk, when unsaved edits moved it.
+#[test]
+fn follow_tui_9_follows_the_buffer_line() {
+    let m = Multi::new();
+    let mut app = m.app();
+    open_file(&mut app, 2);
+    press(&mut app, 'g');
+    typ(&mut app, "# one\n# two\n");
+    app.handle(key(KeyCode::Esc));
+    select(&mut app, "github");
+    select(&mut app, "ranch-nas");
+    let text = app.editor_text();
+    let line = host_line(&text, "ranch-nas");
+    assert_eq!(line, host_line(&read(&m.ranch), "ranch-nas") + 2);
+    assert_eq!(app.editor_cursor(), (line, 0));
+}
+
+/// follow-tui-10: a filter matching nothing leaves the editor alone.
+#[test]
+fn follow_tui_10_empty_table_leaves_the_editor() {
+    let m = Multi::new();
+    let mut app = m.app();
+    select(&mut app, "cypress-lab");
+    let (file, cursor) = (app.shown_file().to_path_buf(), app.editor_cursor());
+    press(&mut app, '/');
+    typ(&mut app, "zzz\n");
+    assert_eq!(app.selected(), None);
+    assert_eq!(app.shown_file(), file.as_path());
+    assert_eq!(app.editor_cursor(), cursor);
+    press(&mut app, 'j');
+    assert_eq!(app.editor_cursor(), cursor);
+}
+
+/// follow-tui-11: tabbing away and back without a new selection keeps a
+/// cursor the user placed.
+#[test]
+fn follow_tui_11_tab_round_trip_keeps_the_cursor() {
+    let m = Multi::new();
+    let mut app = m.app();
+    select(&mut app, "ranch-nas");
+    app.handle(key(KeyCode::Tab));
+    assert_eq!(app.focus(), rustorm_tui::Focus::Editor);
+    app.handle(key(KeyCode::Down));
+    app.handle(key(KeyCode::Down));
+    let cursor = app.editor_cursor();
+    for _ in 0..4 {
+        app.handle(key(KeyCode::Tab));
+    }
+    assert_eq!(app.focus(), rustorm_tui::Focus::Editor);
+    assert_eq!(app.shown_file(), m.ranch.as_path());
+    assert_eq!(app.editor_cursor(), cursor);
+}
+
+/// follow-tui-12: `o` still opens the editor at the host and focuses it.
+#[test]
+fn follow_tui_12_o_still_focuses_the_editor() {
+    let m = Multi::new();
+    let mut app = m.app();
+    select(&mut app, "dcevant");
+    press(&mut app, 'o');
+    assert_eq!(app.focus(), rustorm_tui::Focus::Editor);
+    assert_eq!(app.shown_file(), m.ranch.as_path());
+    assert_eq!(
+        app.editor_cursor(),
+        (host_line(&read(&m.ranch), "dcevant"), 0)
+    );
+}

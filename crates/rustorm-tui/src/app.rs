@@ -648,6 +648,42 @@ impl App {
         }
     }
 
+    /// Shows the selected host's file in the editor with the cursor on its
+    /// `Host` line: the buffer's line first, so unsaved edits that moved it
+    /// are honored, else the line on disk.
+    fn show_selected_host(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        let (name, fi) = (row.name.clone(), row.file_index);
+        self.show_file(fi);
+        let line = self.editors[fi].find_host_line(&name).or_else(|| {
+            let config = &self.ws.files[fi].config;
+            config
+                .find_primary(&name)
+                .map(|l| config.host_line(l).saturating_sub(1))
+        });
+        if let Some(line) = line {
+            self.editors[fi].jump(line);
+        }
+    }
+
+    /// Makes the editor follow the browsing panes (docs/tui.md, Editor): a
+    /// new selected host shows at its `Host` line; a new highlight in the
+    /// file list shows that file. An unchanged selection leaves the editor
+    /// and its cursor alone.
+    fn follow(&mut self, files_sel: usize, host: Option<String>) {
+        if self.selected() != host.as_deref() && self.selected().is_some() {
+            self.show_selected_host();
+        } else if self.files_sel != files_sel {
+            if let Some(FileState::Loaded(i)) =
+                self.ws.load_order.get(self.files_sel).map(|e| e.state.clone())
+            {
+                self.cur = i;
+            }
+        }
+    }
+
     fn refresh(&mut self, select: Option<&str>) {
         let keep = select
             .map(str::to_string)
@@ -1047,6 +1083,13 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return;
         }
+        let files_sel = self.files_sel;
+        let host = self.selected().map(str::to_string);
+        self.handle_key(key);
+        self.follow(files_sel, host);
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let mode = std::mem::replace(&mut self.mode, Mode::Normal);
         if ctrl && key.code == KeyCode::Char('c') {
@@ -1330,21 +1373,9 @@ impl App {
                     self.open_form(FormKind::Move { name, section });
                 }
             }
-            KeyCode::Char('o') => {
-                if let Some(name) = need_host(self) {
-                    let fi = self.selected_row().map_or(0, |r| r.file_index);
-                    self.show_file(fi);
-                    let row = self.editors[fi].find_host_line(&name).or_else(|| {
-                        let config = &self.ws.files[fi].config;
-                        config
-                            .find_primary(&name)
-                            .map(|l| config.host_line(l).saturating_sub(1))
-                    });
-                    if let Some(row) = row {
-                        self.editors[fi].jump(row);
-                    }
-                    self.focus = Focus::Editor;
-                }
+            KeyCode::Char('o') if need_host(self).is_some() => {
+                self.show_selected_host();
+                self.focus = Focus::Editor;
             }
             _ => {}
         }
