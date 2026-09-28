@@ -172,7 +172,7 @@ pub struct App {
     current: usize,
     /// A Host line to put the editor's cursor on at the next frame.
     goto_line: Option<usize>,
-    /// The Host line the editor was last opened at.
+    /// The Host line the editor's cursor was last put on.
     editor_line: Option<usize>,
     /// The selected tab.
     pub tab: Tab,
@@ -285,10 +285,17 @@ impl App {
         &self.buffers[i]
     }
 
-    /// The 1-based Host line the editor was last opened at by
-    /// [`App::open_in_editor`].
+    /// The 1-based line the editor's cursor was last put on, by
+    /// [`App::open_in_editor`] or by the Editor tab showing a newly
+    /// selected host.
     pub fn editor_line(&self) -> Option<usize> {
         self.editor_line
+    }
+
+    /// The 1-based line the editor's cursor goes to when the Editor tab
+    /// next shows: the `Host` line of a newly selected host.
+    pub fn pending_editor_line(&self) -> Option<usize> {
+        self.goto_line
     }
 
     /// The loaded files' indices in load order.
@@ -485,10 +492,46 @@ impl App {
         }
     }
 
-    /// Selects `name` and opens it in the detail form.
+    /// Selects `name` and opens it in the detail form. A newly selected
+    /// host also becomes the editor's: its file is selected there and the
+    /// cursor goes to its `Host` line when the Editor tab next shows.
     pub fn select(&mut self, name: &str) {
+        if self.selected.as_deref() != Some(name) {
+            self.follow_host(name);
+        }
         self.selected = Some(name.to_string());
         self.form = self.rows.iter().find(|r| r.name == name).map(Form::edit);
+    }
+
+    /// Points the editor at host `name` without leaving the Hosts tab: its
+    /// file, and its `Host` line in that file's buffer (so unsaved edits
+    /// that moved it are honored), else the line on disk.
+    fn follow_host(&mut self, name: &str) {
+        let Some(wl) = self.ws.find_host(name) else {
+            return;
+        };
+        self.select_file(wl.file);
+        let line = buffer_host_line(&self.buffers[wl.file], name)
+            .unwrap_or_else(|| self.ws.host_line(wl));
+        self.goto_line = Some(line);
+    }
+
+    /// Moves the selection `delta` rows through the visible hosts.
+    fn move_selection(&mut self, delta: isize) {
+        let names = self.visible_names();
+        if names.is_empty() {
+            return;
+        }
+        let at = self
+            .selected
+            .as_ref()
+            .and_then(|s| names.iter().position(|n| n == s));
+        let next = match at {
+            Some(i) => (i as isize + delta).clamp(0, names.len() as isize - 1) as usize,
+            None => 0,
+        };
+        let name = names[next].clone();
+        self.select(&name);
     }
 
     /// Opens the empty add form.
@@ -819,6 +862,12 @@ impl App {
             if ctx.input(|i| i.key_pressed(Key::Escape)) {
                 self.form = None;
                 self.selected = None;
+            }
+            if ctx.input(|i| i.key_pressed(Key::ArrowDown)) {
+                self.move_selection(1);
+            }
+            if ctx.input(|i| i.key_pressed(Key::ArrowUp)) {
+                self.move_selection(-1);
             }
         }
     }
@@ -1411,6 +1460,9 @@ impl App {
         if changed {
             self.editor_error = None;
         }
+        if goto.is_some() {
+            self.editor_line = goto;
+        }
     }
 
     /// The popup above the editor that picks the file it shows: every file
@@ -1690,4 +1742,15 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
     }
+}
+
+/// The 1-based line of the `Host` line naming `name` in `text`.
+fn buffer_host_line(text: &str, name: &str) -> Option<usize> {
+    text.lines()
+        .position(|l| {
+            let mut words = l.split_whitespace();
+            words.next().is_some_and(|w| w.eq_ignore_ascii_case("host"))
+                && words.any(|w| w.trim_matches('"') == name)
+        })
+        .map(|i| i + 1)
 }
