@@ -32,6 +32,7 @@ rustorm add-section lab                       # create an empty section
 rustorm combine ~/.ssh/config ~/.ssh/config.d/cypress   # merge a second file into your config
 rustorm search 'example\.com'                 # regex over names, aliases, keys and values
 rustorm check                                 # unknown keys, missing identity files, duplicates
+rustorm includes                              # the files your Include lines load, with host counts
 ```
 
 `rustorm --help` lists every command. `--json` gives machine-readable output on read commands. Options may appear anywhere on the line.

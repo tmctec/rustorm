@@ -38,6 +38,7 @@ rustorm add-section lab                       # create an empty section
 rustorm combine ~/.ssh/config ~/.ssh/config.d/cypress   # merge a second file into your config
 rustorm delete vps                            # remove a host
 rustorm check                                 # report unknown keys, missing files, duplicates
+rustorm includes                              # the files your Include lines load
 ```
 
 `rustorm --help` lists every command; `rustorm <command> --help` shows its options. Add `--json` before a read command (`rustorm --json list`) for machine-readable output.
@@ -62,6 +63,29 @@ rustorm combine a.conf b.conf --on-conflict replace            # ...or take b.co
 
 A host name that appears in two files is a conflict. Without `--on-conflict`, `combine` lists every conflict and writes nothing, so it never silently overwrites a host. The file that gets written is backed up first, like every other change. If your config has an `Include` line that still loads one of the files you merged, `combine` warns you so you can remove the line yourself.
 
+## Included files
+
+If your config has an `Include` line, rustorm follows it the way ssh does and treats the main config plus every file it loads as one set. `Include` takes absolute paths, `~/` paths or paths relative to `~/.ssh`, and wildcards such as `config.d/*`; included files may hold `Include` lines of their own. Every command sees every host, so `list`, `search` and `check` cover all files, and `list` and `sections` print a heading per file. A config without `Include` works exactly as described above.
+
+Changes go to the right file without you naming it:
+
+- Editing, renaming, deleting or aliasing a host writes the file that holds the host.
+- `--section NAME` on `add`, `clone` or `move` writes the file that holds that section. A section held by no file is created in the main config.
+- `add` without `--section` writes the main config.
+- `-f, --file NAME` chooses a file yourself, by the file name of a loaded file (`--file cypress`) or a path. It works on `add`, `edit`, `clone`, `move`, `set`, `unset`, `delete`, `alias`, `unalias`, `add-section`, `rename-section`, `delete-all` and `dump`.
+
+When more than one file is loaded, every message names the file it wrote. A section name held by two files is refused until you say which with `--file`. A host defined in two files is edited in the first file ssh reads, with a warning naming the other.
+
+```
+rustorm includes                                        # every file the Include lines load, with host counts
+rustorm add db2 postgres@10.10.158.44 --section "data foundry"   # goes to the file holding that section
+rustorm set cypressPro-ext Port 22                      # goes to the file holding cypressPro-ext
+rustorm add-section evant --file df-evant               # creates the section in that file
+rustorm dump --file cypress                             # print one included file
+```
+
+`rustorm check` also reports a host defined in two files (ssh uses the first), an `Include` that loads a file that looks like a backup (`.bak`, `.orig`, `~`), an `Include` placed inside `Host *` (rustorm treats it as global), and an included file it cannot read. Each file written is backed up beside it first. When a wildcard in an `Include` would match that backup, rustorm names it `.<file>~` instead (`~/.ssh/config.d/.cypress~`) so neither ssh nor rustorm ever loads a backup as a config.
+
 ## Terminal UI
 
 `rustorm-tui` opens a screen with a section list on the left, the host table in the middle and a status line at the bottom. Press `?` at any time for the key overlay. The essentials:
@@ -76,12 +100,13 @@ A host name that appears in two files is a conflict. Without `--on-conflict`, `c
 | `a` `e` `d` `c` `m` | Add, edit, delete (with confirmation), clone, move or rename the selected host |
 | `R` on a section | Rename the section |
 | `n` | Create an empty section |
-| `o` | Open the editor at the selected host |
+| `F` | Focus the file list (shown when the config includes other files); `Enter` opens that file in the editor |
+| `o` | Open the editor at the selected host, in the file that holds it |
 | `Ctrl-S` / `Ctrl-R` | In the editor: save, or discard and reload |
 | `Esc` | Cancel a form or prompt, or leave the editor |
-| `q` | Quit; asks first if the editor has unsaved edits |
+| `q` | Quit; asks first if the editor has unsaved edits, listing every unsaved file |
 
-Every table column sorts and filters, including proxy (`ProxyCommand`) and jump (`ProxyJump`). Hosts without the sorted key sort last. Filters combine: a section filter and a user filter together show only hosts matching both. Full key list: `docs/tui.md`.
+Every table column sorts and filters, including proxy (`ProxyCommand`) and jump (`ProxyJump`). Hosts without the sorted key sort last. Filters combine: a section filter and a user filter together show only hosts matching both. With included files the table gains a file column and the editor keeps one buffer per file; `Ctrl-S` saves only the file shown. Full key list: `docs/tui.md`.
 
 ## Desktop window
 
@@ -91,11 +116,12 @@ Every table column sorts and filters, including proxy (`ProxyCommand`) and jump 
 - Select a row to edit it in the detail panel: name, connection URI, identity file and section. Clearing the identity file removes it from the host. Save writes the file; Delete asks first.
 - Add opens the same form empty. Clone and Move to section act on the selected host.
 - New section… under the sidebar creates an empty section; on a file without sections it also creates the catch-all.
+- With included files the sidebar lists every file with its host count, the table gains a file column, and the editor has a file selector; Save writes only the selected file. Show in Editor on a host opens its file at its `Host` line. Quitting with several unsaved files lists them in one dialog with Save All.
 - Shortcuts: `Cmd-S` (or `Ctrl-S`) save, `Cmd-N` add, `Cmd-F` focus the filter, `Cmd-E` open the editor, `Cmd-1` / `Cmd-2` switch tabs, `Delete` remove the selected host, `Esc` cancel.
 
 ## The embedded editor
 
-Both UIs include an editor for the raw config file with syntax highlighting: comments, section banners, `Host` lines, keys, values, and `ProxyCommand` and `ProxyJump` in their own colors. Saving writes through the same engine as the CLI, so a backup is made, untouched lines stay byte for byte, and sections are re-sorted. An edit that would break the file, such as a `Host` line with no name, is refused with its line number. If the file changed on disk while you were editing, the UI reloads it before applying your change; if the same host changed on both sides it asks which version to keep. Quitting with unsaved edits asks whether to save or discard.
+Both UIs include an editor for the raw config file with syntax highlighting: comments, section banners, `Host` lines, keys, values, and `ProxyCommand` and `ProxyJump` in their own colors. Saving writes through the same engine as the CLI, so a backup is made, untouched lines stay byte for byte, and sections are re-sorted. An edit that would break the file, such as a `Host` line with no name, is refused with its line number. If the file changed on disk while you were editing, the UI reloads it before applying your change; if the same host changed on both sides it asks which version to keep. Quitting with unsaved edits asks whether to save or discard. With included files the editor holds one buffer per file and saves them one at a time, each with its own backup.
 
 ## Files
 
@@ -103,6 +129,7 @@ Both UIs include an editor for the raw config file with syntax highlighting: com
 |---|---|
 | `~/.ssh/config` | The only place host data lives. Created with mode 0600 if missing. |
 | `~/.ssh/config~` | Backup written before every change. `--no-backup` skips it. |
+| Files named by `Include` lines | Read and written as part of the config; each is backed up beside itself before a change, as `.<file>~` when an `Include` wildcard would otherwise load the backup. |
 | `~/.config/rustorm/config.toml` (Linux), `~/Library/Application Support/rustorm/config.toml` (macOS), `%AppData%\rustorm\config.toml` (Windows) | Optional command aliases and defaults for the CLI. |
 
 Errors go to standard error prefixed `error:`. Exit codes: 0 success, 1 the operation was refused (host missing, name taken, invalid input), 2 usage error, 3 the config file could not be read or written.
