@@ -65,6 +65,15 @@ fn plan(heading: &str) -> Option<Vec<Step>> {
         "backup" => vec![(f("show"), 0)],
         // A file with two problems, then a clean one.
         "check" => vec![(f("check-problems"), 1), (f("fourteen"), 0)],
+        // The Included files workspace (config.d and ranch.d seeded by
+        // [`extra_files`]), a root whose only Include matches nothing, and
+        // a root without Include.
+        "includes" => vec![
+            (f("includes-root"), 0),
+            (None, 0),
+            (f("includes-empty"), 0),
+            (f("list-flat"), 0),
+        ],
         "completion" => vec![(f("empty"), 0)],
         "version" => vec![(f("empty"), 0)],
         _ => return None,
@@ -78,6 +87,12 @@ fn extra_files(heading: &str) -> Vec<(&'static str, &'static str)> {
         "combine" => vec![
             ("combine-cypress", "config.d/cypress"),
             ("combine-legacy", "config.d/legacy"),
+        ],
+        "includes" => vec![
+            ("includes-cypress", "config.d/cypress"),
+            ("includes-df-austin", "config.d/df-austin"),
+            ("includes-ranch", "config.d/ranch"),
+            ("includes-lab", "ranch.d/lab"),
         ],
         _ => Vec::new(),
     }
@@ -437,7 +452,7 @@ fn every_cli_md_example_matches() {
     );
     assert_eq!(
         blocks.len(),
-        22,
+        23,
         "docs/cli.md has one Examples block per command"
     );
     assert!(

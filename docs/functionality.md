@@ -24,6 +24,7 @@ This document describes rustorm's target behavior: how the config file is parsed
 | [rename-section](cli.md#rename-section) | Renames a section and regenerates its banner. |
 | [add-section](cli.md#add-section) | Creates an empty section by name. |
 | [combine](cli.md#combine) | Merges two or more config files into the first, refusing duplicate names unless told how to resolve them. |
+| [includes](cli.md#includes) | Lists every `Include` line with the files it loads and their host counts. |
 | [backup](cli.md#backup) | Copies the config file to a named target. |
 | [check](cli.md#check) | Reports config problems without changing the file. |
 | [completion](cli.md#completion) | Prints a shell completion script. |
@@ -51,6 +52,7 @@ The config file is the only state rustorm keeps. Every command parses it fresh a
 - **Aliases on the `Host` line.** A host's extra names live as additional tokens on its own `Host` line (`Host primary alias1 alias2`), not in a separate structure. [alias](cli.md#alias) and [unalias](cli.md#unalias) edit that line.
 - **Canonical key case.** Keys are matched case-insensitively but always written in ssh_config(5)'s canonical case — `HostName`, `IdentityFile`, `Port` — regardless of how they were typed or how they appeared in a hand-edited file.
 - **File creation.** A missing config file (and its parent directory) is created with mode `0600` on the first write.
+- **Included files.** The root's `Include` lines are followed as ssh follows them, and the root plus every file they load form one workspace: every command sees every host, and each write goes to the one file that holds what it changes, or the file `--file` names. A root without `Include` is a workspace of one file. See [Included files](cli.md#included-files).
 - **Backup.** Every write copies the file to `<config>~` first, unless `--no-backup` is given — for the default config file, that backup lands at `~/.ssh/config~`. [backup](cli.md#backup) additionally makes a named copy on demand.
 
 ## Sections
@@ -91,6 +93,9 @@ Every error a command can print in `cli.md`'s examples, with the exit code it ca
 | [add-section](cli.md#add-section) | `error: section lab already exists.` | 1 |
 | [combine](cli.md#combine) | `error: 2 hosts are defined more than once; nothing written. Use --on-conflict keep or replace.` | 1 |
 | [combine](cli.md#combine) | `error: combine needs at least two files.` | 2 |
+| [Included files](cli.md#included-files) | `error: section lab exists in ~/.ssh/config.d/cypress and ~/.ssh/config.d/gke. Say which with --file.` | 1 |
+| [Included files](cli.md#included-files) | `error: no such file nas in the workspace.` | 1 |
+| [Included files](cli.md#included-files) | `error: cannot read ~/.ssh/config.d/private (permission denied).` | 3 |
 
 Every error prints to stderr prefixed `error: `, per `cli.md`'s Exit status chapter.
 
@@ -109,3 +114,4 @@ Places rustorm's target behavior departs from storm or ssh-config, each traced t
 - **Multi-valued keys generalized.** storm special-cases exactly three keys (`identityfile`, `localforward`, `remoteforward`) to accumulate; every other repeated key silently loses all but its first value on round-trip. ssh-config has no multi-valued handling at all — one line per key, always. rustorm accumulates the full ssh_config(5) multi-valued key set, and `set --append` is the explicit way to add rather than replace (F-31).
 - **Sections are new.** Neither storm nor ssh-config groups hosts into named, orderable, renamable banner sections with an automatic catch-all. This is new in rustorm (F-20, F-21, F-22, F-45, F-46, F-47).
 - **Combining files is new.** Neither storm nor ssh-config merges config files; `Include` is ssh's own answer, which leaves every included file separate. `combine` folds files into one, merging sections by name and `Host *` key by key, and fails on a duplicate name unless told to keep or replace (F-52). `add-section` creates a section without adding a host, which the `--section` flag alone cannot do (F-53).
+- **`Include` is a workspace.** storm and ssh-config read only the file they are pointed at and ignore `Include`, so a host in `~/.ssh/config.d/*` is invisible to them and a second copy can be added beside it unnoticed. rustorm follows `Include` as ssh does and treats the matched files as one workspace: `list`, `search` and `check` see every host, an edit lands in the file that already holds the host, `--section` lands in the file that holds the section, and `--file` overrides both (F-54, F-55). `includes` shows which files each `Include` loaded; `check` flags a host defined twice, an included backup file and an `Include` hidden inside `Host *`. The editors in the TUI and GUI edit the files one at a time (F-56). `combine` remains the way to fold included files into one.

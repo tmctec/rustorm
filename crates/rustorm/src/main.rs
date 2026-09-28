@@ -46,7 +46,10 @@ fn rewrite_user_alias(mut args: Vec<OsString>, user: &UserConfig) -> Vec<OsStrin
             return args;
         }
         if word.starts_with('-') {
-            if matches!(word, "-c" | "--config" | "-s" | "--section") {
+            if matches!(
+                word,
+                "-c" | "--config" | "-s" | "--section" | "-f" | "--file"
+            ) {
                 i += 1;
             }
             i += 1;
@@ -109,6 +112,10 @@ fn real_main(args: Vec<OsString>) -> i32 {
     };
     if cli.section.is_some() && !command.takes_section() {
         let err = Error::Usage(format!("--section does not apply to {}.", command.name()));
+        return print_error(&err, color);
+    }
+    if cli.file.is_some() && !command.takes_file() {
+        let err = Error::Usage(format!("--file does not apply to {}.", command.name()));
         return print_error(&err, color);
     }
     match run::run(&cli, command, &user, color) {

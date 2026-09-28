@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::include::{glob_match, resolve_include};
 use crate::model::{split_patterns, Config, Entry, HostBlock, HostLocation, Line};
 use crate::{keys, Error, Result};
 
@@ -158,50 +159,6 @@ pub(crate) fn conflicts_message(conflicts: &[Conflict]) -> String {
         ));
     }
     msg
-}
-
-/// Glob match with `*` (any run of non-`/` characters) and `?` (one
-/// non-`/` character); everything else is literal.
-pub fn glob_match(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    glob_chars(&p, &t)
-}
-
-fn glob_chars(p: &[char], t: &[char]) -> bool {
-    match (p.first(), t.first()) {
-        (None, None) => true,
-        (None, Some(_)) => false,
-        (Some('*'), _) => {
-            let mut i = 0;
-            loop {
-                if glob_chars(&p[1..], &t[i..]) {
-                    return true;
-                }
-                if i < t.len() && t[i] != '/' {
-                    i += 1;
-                } else {
-                    return false;
-                }
-            }
-        }
-        (Some('?'), Some(c)) => *c != '/' && glob_chars(&p[1..], &t[1..]),
-        (Some(a), Some(b)) => a == b && glob_chars(&p[1..], &t[1..]),
-        (Some(_), None) => false,
-    }
-}
-
-/// An `Include` pattern as an absolute path string: absolute as is, `~/`
-/// under `home`, anything else under `~/.ssh`, as ssh resolves them.
-fn resolve_include(pattern: &str, home: Option<&Path>) -> Option<String> {
-    let p = pattern.trim_matches('"');
-    if p.starts_with('/') {
-        return Some(p.to_string());
-    }
-    if let Some(rest) = p.strip_prefix("~/") {
-        return Some(home?.join(rest).display().to_string());
-    }
-    Some(home?.join(".ssh").join(p).display().to_string())
 }
 
 fn absolute(path: &Path) -> String {
@@ -469,30 +426,4 @@ pub fn combine(
     report.hosts = result.host_count();
     report.sections = result.sections.len();
     Ok((result, report))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn glob_star_does_not_cross_slash() {
-        assert!(glob_match("/h/.ssh/config.d/*", "/h/.ssh/config.d/cypress"));
-        assert!(!glob_match("/h/.ssh/config.d/*", "/h/.ssh/config.d/x/y"));
-        assert!(glob_match("/h/.ssh/c?nfig", "/h/.ssh/config"));
-        assert!(!glob_match("/h/.ssh/c?nfig", "/h/.ssh/cnfig"));
-        assert!(glob_match("/a/*.conf", "/a/.conf"));
-    }
-
-    #[test]
-    fn include_patterns_resolve_like_ssh() {
-        let h = Path::new("/h");
-        assert_eq!(resolve_include("/abs/x", Some(h)).unwrap(), "/abs/x");
-        assert_eq!(resolve_include("~/x/*", Some(h)).unwrap(), "/h/x/*");
-        assert_eq!(
-            resolve_include("config.d/*", Some(h)).unwrap(),
-            "/h/.ssh/config.d/*"
-        );
-        assert_eq!(resolve_include("config.d/*", None), None);
-    }
 }

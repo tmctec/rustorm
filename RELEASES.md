@@ -1,5 +1,17 @@
 # Releases
 
+## 2026-09-28 — rustorm follows your Include lines
+
+**New**
+- If your `~/.ssh/config` has an `Include` line, rustorm now reads every file it loads, the same way ssh does, and treats them all as your config. `rustorm list` shows every host with a heading per file, and `rustorm includes` shows which files are loaded and how many hosts each holds.
+- Changes land in the right file without you naming it: editing a host writes the file that holds it, `--section` writes the file that holds the section, and a plain `add` goes to your main config. Say `--file cypress` when you want to choose yourself.
+- `rustorm check` now warns when a host is defined in two files, when an `Include` wildcard is loading a backup or a stray file, when an `Include` sits inside `Host *`, and when an included file cannot be read.
+- The terminal UI and the desktop app list your files, show which file each host lives in, and let you edit and save each file on its own. Quitting with several unsaved files lists them all.
+
+**Improved**
+- Backups of included files are named so that an `Include` wildcard never loads them, so a backup can no longer resurrect a host you deleted.
+- A config without `Include` works exactly as before.
+
 ## 2026-09-28 — Merge config files and create sections directly
 
 **New**

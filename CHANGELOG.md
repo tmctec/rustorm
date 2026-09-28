@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented here. Format follows [Keep a Changelog](https://keepachangelog.com).
 
+## [dhole] - 2026-09-28
+
+### Added
+- `Include` support: rustorm resolves the root config's `Include` lines the way ssh does (absolute, `~/`, relative to `~/.ssh`, globs in lexical order, nested includes with a cycle guard, `Include` inside `Host *` treated as global) and works on the root plus every loaded file as one workspace. A config without `Include` behaves byte for byte as before (D21).
+- Routing (D22): a host edit writes the file holding the host; `--section` writes the file holding the section, creating a section in no file in the root; `add` without `--section` writes the root; `delete-all` sweeps every file. A section held by two files is refused with `--file` as the remedy; a host defined in two files is edited in ssh's first file with a warning.
+- `-f, --file <NAME|FILE>` global option on `add`, `edit`, `clone`, `move`, `set`, `unset`, `delete`, `alias`, `unalias`, `add-section`, `rename-section`, `delete-all` and `dump`; other commands refuse it with exit 2.
+- `rustorm includes`: lists every file the `Include` lines load, nested, with host counts, in text and `--json`.
+- `rustorm check` reports a host defined in two files, an `Include` that loads a backup-looking file, an `Include` inside `Host *`, and an unreadable include.
+- `list` and `sections` print a heading per file on a multi-file workspace; every `--json` row carries `"file"` (D23); write messages name the file when more than one is loaded.
+- rustorm-core: `include.rs` (`resolve_includes`, shared glob matcher moved out of `combine.rs`), `workspace.rs` (`Workspace`, `WorkspaceLocation`, per-file save with a writability pre-check so a cross-file move never half-applies, `backup_path_for`), workspace-routed ops returning `Change{messages, files, warnings}`, new errors `AmbiguousSection`, `AmbiguousFile`, `UnknownFile`, `HostExistsIn`, `UnreadableInclude`.
+- rustorm-tui: file list pane on `F` (in the Tab cycle), a file column, one editor buffer per file with per-file `Ctrl-S` and backup, `o` opens the host's file at its `Host` line, one quit prompt listing every dirty file.
+- rustorm-gui: Files list in the sidebar, file column, editor file selector, per-file Save and backup, Show in Editor, one Quit alert listing every dirty file with Save All.
+- docs/cli.md: `## Included files`, `### includes`, D21 to D24; F-54 to F-56 in features.md; `## Files` in tui.md and gui.md; user guide section.
+
+### Changed
+- Backups (D24): when an `Include` pattern would match a file's `<file>~`, the backup is written to `<dir>/.<name>~` so neither ssh nor rustorm loads rustorm's own backup; the root keeps `<config>~`.
+- An unreadable include is skipped with a warning by read commands and refused with exit 3 by writes routed to it.
+- Test registry: 51 new tests (229 total), every catalog case revalidated against the new tree; Makefile `test-core` help text names include and workspace.
+
 ## [carp] - 2026-09-28
 
 ### Added

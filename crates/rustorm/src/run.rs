@@ -5,11 +5,11 @@ use std::io::{BufRead, IsTerminal};
 use std::path::PathBuf;
 
 use rustorm_core::{
-    combine as core_combine, is_multi_valued, pair_up, parse_option, resolve_config_path,
-    write_text, AddSpec, CloneSpec, CombineInput, CombineReport, ConfigFile, EditSpec, Env, Error,
-    HostSelector, ListRow, OnConflict, Result, SectionRename, UserConfig, WriteOptions,
+    combine as core_combine, pair_up, parse_option, resolve_config_path, write_text, AddSpec,
+    Change, CloneSpec, CombineInput, CombineReport, ConfigFile, EditSpec, Env, Error,
+    HostSelector, IncludeMatch, IncludeStatus, ListRow, OnConflict, Result, UserConfig,
+    Workspace, WriteOptions,
 };
-use serde::ser::SerializeMap;
 use serde::Serialize;
 
 use crate::cli::{Cli, Cmd};
@@ -25,6 +25,7 @@ struct Ctx {
     json: bool,
     color: bool,
     section: Option<String>,
+    file: Option<String>,
     write: WriteOptions,
     env: Env,
 }
@@ -36,15 +37,47 @@ impl Ctx {
         }
     }
 
-    fn load(&self) -> Result<ConfigFile> {
-        ConfigFile::load(&self.path)
+    fn file(&self) -> Option<&str> {
+        self.file.as_deref()
     }
 
-    fn save(&self, file: &mut ConfigFile) -> Result<()> {
-        if file.is_modified() {
-            file.save(self.write)?;
+    /// Loads the root and every file its `Include` lines load.
+    fn load(&self) -> Result<Workspace> {
+        Workspace::load(&self.path)
+    }
+
+    /// Loads the workspace for a read command and prints its load warnings
+    /// (unreadable includes, D24) on stderr.
+    fn load_read(&self) -> Result<Workspace> {
+        let ws = self.load()?;
+        for w in ws.load_warnings() {
+            self.warn(&w);
         }
-        Ok(())
+        Ok(ws)
+    }
+
+    fn warn(&self, msg: &str) {
+        out::stderr(&format!(
+            "{} {msg}\n",
+            paint(
+                "warning:",
+                Style::Warning,
+                self.color && std::io::stderr().is_terminal()
+            )
+        ));
+    }
+
+    /// Saves every file the change touched, then prints its warnings on
+    /// stderr and its messages on stdout.
+    fn finish<T>(&self, ws: &mut Workspace, change: Change<T>) -> Result<T> {
+        ws.save(self.write)?;
+        for w in &change.warnings {
+            self.warn(w);
+        }
+        for m in &change.messages {
+            self.say(m);
+        }
+        Ok(change.value)
     }
 }
 
@@ -54,62 +87,6 @@ fn plural(n: usize, word: &str) -> String {
     } else {
         format!("{n} {word}s")
     }
-}
-
-/// A `--json list` / `--json search` row: the fields docs/cli.md shows.
-#[derive(Serialize)]
-struct JsonRow<'a> {
-    name: &'a str,
-    section: Option<&'a str>,
-    aliases: &'a [String],
-    hostname: Option<&'a str>,
-    user: &'a str,
-    port: u16,
-    options: JsonOptions<'a>,
-}
-
-struct JsonOptions<'a>(&'a [(String, String)]);
-
-impl Serialize for JsonOptions<'_> {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
-        let mut keys: Vec<&str> = Vec::new();
-        for (k, _) in self.0 {
-            if !keys.contains(&k.as_str()) {
-                keys.push(k);
-            }
-        }
-        let mut map = s.serialize_map(Some(keys.len()))?;
-        for key in keys {
-            let values: Vec<&str> = self
-                .0
-                .iter()
-                .filter(|(k, _)| k == key)
-                .map(|(_, v)| v.as_str())
-                .collect();
-            if is_multi_valued(key) {
-                map.serialize_entry(key, &values)?;
-            } else {
-                map.serialize_entry(key, values[0])?;
-            }
-        }
-        map.end()
-    }
-}
-
-fn json_rows(rows: &[ListRow]) -> String {
-    let rows: Vec<JsonRow> = rows
-        .iter()
-        .map(|r| JsonRow {
-            name: &r.name,
-            section: r.section.as_deref(),
-            aliases: &r.aliases,
-            hostname: r.hostname.as_deref(),
-            user: &r.user,
-            port: r.port,
-            options: JsonOptions(&r.options),
-        })
-        .collect();
-    to_json(&rows)
 }
 
 fn to_json<T: Serialize + ?Sized>(value: &T) -> String {
@@ -148,6 +125,7 @@ pub fn run(cli: &Cli, command: &Cmd, user: &UserConfig, color: bool) -> Result<i
         json: cli.json,
         color,
         section: cli.section.clone(),
+        file: cli.file.clone(),
         write: WriteOptions {
             no_backup: cli.no_backup || !user.defaults.backup,
         },
@@ -202,6 +180,7 @@ pub fn run(cli: &Cli, command: &Cmd, user: &UserConfig, color: bool) -> Result<i
         Cmd::RenameSection { old, new } => rename_section(&ctx, old, new),
         Cmd::Backup { file } => backup(&ctx, file.as_deref()),
         Cmd::Check => check(&ctx),
+        Cmd::Includes => includes(&ctx),
         Cmd::Completion { .. } | Cmd::Version => unreachable!("handled above"),
     }
 }
@@ -224,22 +203,10 @@ fn add(
         options: parse_options(options)?,
         section: ctx.section.clone(),
     };
-    let mut file = ctx.load()?;
-    let placed = file.config.add(&spec, &ctx.env)?;
-    ctx.save(&mut file)?;
-    ctx.say(&added_message(
-        &placed.name,
-        ctx.section.is_some(),
-        placed.section.as_deref(),
-    ));
+    let mut ws = ctx.load()?;
+    let change = ws.add(&spec, ctx.file(), &ctx.env)?;
+    ctx.finish(&mut ws, change)?;
     Ok(0)
-}
-
-fn added_message(name: &str, explicit: bool, section: Option<&str>) -> String {
-    match section {
-        Some(s) if explicit => format!("{name} added to section {s}. Connect with: ssh {name}"),
-        _ => format!("{name} added. Connect with: ssh {name}"),
-    }
 }
 
 fn edit(
@@ -256,16 +223,9 @@ fn edit(
         options: parse_options(options)?,
         section: ctx.section.clone(),
     };
-    let mut file = ctx.load()?;
-    let placed = file.config.edit(&spec, &ctx.env)?;
-    ctx.save(&mut file)?;
-    match (&ctx.section, placed.section) {
-        (Some(_), Some(s)) => ctx.say(&format!(
-            "{} updated and moved to section {s}.",
-            placed.name
-        )),
-        _ => ctx.say(&format!("{} updated.", placed.name)),
-    }
+    let mut ws = ctx.load()?;
+    let change = ws.edit(&spec, ctx.file(), &ctx.env)?;
+    ctx.finish(&mut ws, change)?;
     Ok(0)
 }
 
@@ -277,32 +237,18 @@ fn selector(regex: bool, name: &str) -> HostSelector {
     }
 }
 
-fn updated_message(regex: bool, names: &[String]) -> String {
-    if regex {
-        format!(
-            "{} updated: {}",
-            plural(names.len(), "host"),
-            names.join(", ")
-        )
-    } else {
-        format!("{} updated.", names.join(", "))
-    }
-}
-
 fn set(ctx: &Ctx, regex: bool, append: bool, name: &str, pairs: &[String]) -> Result<i32> {
     let pairs = pair_up(pairs)?;
-    let mut file = ctx.load()?;
-    let names = file.config.set(&selector(regex, name), &pairs, append)?;
-    ctx.save(&mut file)?;
-    ctx.say(&updated_message(regex, &names));
+    let mut ws = ctx.load()?;
+    let change = ws.set(&selector(regex, name), &pairs, append, ctx.file())?;
+    ctx.finish(&mut ws, change)?;
     Ok(0)
 }
 
 fn unset(ctx: &Ctx, regex: bool, name: &str, keys: &[String]) -> Result<i32> {
-    let mut file = ctx.load()?;
-    let names = file.config.unset(&selector(regex, name), keys)?;
-    ctx.save(&mut file)?;
-    ctx.say(&updated_message(regex, &names));
+    let mut ws = ctx.load()?;
+    let change = ws.unset(&selector(regex, name), keys, ctx.file())?;
+    ctx.finish(&mut ws, change)?;
     Ok(0)
 }
 
@@ -320,14 +266,9 @@ fn clone(
         overrides: pair_up(pairs)?,
         section: ctx.section.clone(),
     };
-    let mut file = ctx.load()?;
-    let placed = file.config.clone_host(&spec)?;
-    ctx.save(&mut file)?;
-    ctx.say(&added_message(
-        &placed.name,
-        ctx.section.is_some(),
-        placed.section.as_deref(),
-    ));
+    let mut ws = ctx.load()?;
+    let change = ws.clone_host(&spec, ctx.file())?;
+    ctx.finish(&mut ws, change)?;
     Ok(0)
 }
 
@@ -335,31 +276,16 @@ fn move_host(ctx: &Ctx, name: &str, new_name: Option<&str>) -> Result<i32> {
     if new_name.is_none() && ctx.section.is_none() {
         return Err(Error::MoveNeedsTarget);
     }
-    let mut file = ctx.load()?;
-    let moved = file
-        .config
-        .move_host(name, new_name, ctx.section.as_deref())?;
-    ctx.save(&mut file)?;
-    let (old, new) = (&moved.old_name, &moved.new_name);
-    let msg = match (new_name, moved.section) {
-        (Some(_), Some(s)) => {
-            format!("{old} renamed to {new} and moved to section {s}. Connect with: ssh {new}")
-        }
-        (Some(_), None) => format!("{old} renamed to {new}. Connect with: ssh {new}"),
-        (None, Some(s)) => format!("{old} moved to section {s}."),
-        (None, None) => format!("{old} unchanged."),
-    };
-    ctx.say(&msg);
+    let mut ws = ctx.load()?;
+    let change = ws.move_host(name, new_name, ctx.section.as_deref(), ctx.file())?;
+    ctx.finish(&mut ws, change)?;
     Ok(0)
 }
 
 fn delete(ctx: &Ctx, names: &[String]) -> Result<i32> {
-    let mut file = ctx.load()?;
-    let deleted = file.config.delete(names)?;
-    ctx.save(&mut file)?;
-    for n in deleted {
-        ctx.say(&format!("{n} deleted."));
-    }
+    let mut ws = ctx.load()?;
+    let change = ws.delete(names, ctx.file())?;
+    ctx.finish(&mut ws, change)?;
     Ok(0)
 }
 
@@ -368,17 +294,13 @@ fn stdin_is_terminal() -> bool {
 }
 
 fn delete_all(ctx: &Ctx, yes: bool) -> Result<i32> {
-    let mut file = ctx.load()?;
-    let count = file.config.host_count();
+    let mut ws = ctx.load()?;
+    let (count, _) = ws.delete_all_count(ctx.file())?;
     if count > 0 && !yes {
         if !stdin_is_terminal() {
             return Err(Error::RefuseDeleteAll(count));
         }
-        out::stderr(&format!(
-            "Delete {} from {}? [y/N] ",
-            plural(count, "host"),
-            ctx.path.display()
-        ));
+        out::stderr(&ws.delete_all_prompt(ctx.file())?);
         let mut answer = String::new();
         std::io::stdin()
             .lock()
@@ -388,31 +310,40 @@ fn delete_all(ctx: &Ctx, yes: bool) -> Result<i32> {
             return Err(Error::Declined);
         }
     }
-    let removed = file.config.delete_all();
-    ctx.save(&mut file)?;
-    ctx.say(&format!("{} deleted.", plural(removed, "host")));
+    let change = ws.delete_all(ctx.file())?;
+    ctx.finish(&mut ws, change)?;
     Ok(0)
 }
 
 fn list(ctx: &Ctx, long: bool, names_only: bool) -> Result<i32> {
-    let file = ctx.load()?;
-    let config = &file.config;
-    let mut rows = config.list(&ctx.env);
+    let ws = ctx.load_read()?;
+    let mut rows = ws.list(&ctx.env);
     if let Some(wanted) = &ctx.section {
-        let idx = config
-            .find_section(wanted)
-            .ok_or_else(|| Error::SectionNotFound(wanted.clone()))?;
-        let name = config.sections[idx].name().to_string();
-        rows.retain(|r| r.section.as_deref() == Some(name.as_str()));
+        // Every file holding the section keeps its rows (docs/cli.md list).
+        let names: Vec<Option<String>> = ws
+            .files
+            .iter()
+            .map(|f| {
+                f.config
+                    .find_section(wanted)
+                    .map(|idx| f.config.sections[idx].name().to_string())
+            })
+            .collect();
+        if names.iter().all(Option::is_none) {
+            return Err(Error::SectionNotFound(wanted.clone()));
+        }
+        rows.retain(|r| {
+            names[r.file].is_some() && r.row.section.as_deref() == names[r.file].as_deref()
+        });
     }
     if ctx.json {
-        out::line(&json_rows(&rows));
+        out::line(&to_json(&rows));
         return Ok(0);
     }
     if names_only {
         let mut text = String::new();
         for r in &rows {
-            text.push_str(&r.name);
+            text.push_str(&r.row.name);
             text.push('\n');
         }
         out::stdout(&text);
@@ -420,30 +351,40 @@ fn list(ctx: &Ctx, long: bool, names_only: bool) -> Result<i32> {
     }
     let width = rows
         .iter()
-        .map(|r| r.name.chars().count())
+        .map(|r| r.row.name.chars().count())
         .max()
         .unwrap_or(0);
-    let headings = config.has_sections();
+    let multi = ws.is_multi();
     let mut text = String::new();
+    let mut current_file: Option<usize> = None;
     let mut current: Option<Option<&str>> = None;
     for r in &rows {
-        if headings && current != Some(r.section.as_deref()) {
-            current = Some(r.section.as_deref());
-            if let Some(s) = &r.section {
+        if current_file != Some(r.file) {
+            current_file = Some(r.file);
+            current = None;
+            if multi {
+                text.push_str(&paint(&ws.display(r.file), Style::Heading, ctx.color));
+                text.push('\n');
+            }
+        }
+        let headings = ws.files[r.file].config.has_sections();
+        if headings && current != Some(r.row.section.as_deref()) {
+            current = Some(r.row.section.as_deref());
+            if let Some(s) = &r.row.section {
                 text.push_str(&paint(&format!("[{s}]"), Style::Heading, ctx.color));
                 text.push('\n');
             }
         }
-        text.push_str(&row_line(r, width, ctx.color));
+        text.push_str(&row_line(&r.row, width, ctx.color));
         text.push('\n');
         if long {
-            for (k, v) in &r.options {
+            for (k, v) in &r.row.options {
                 text.push_str(&format!("    {} {v}\n", paint(k, Style::Key, ctx.color)));
             }
         }
     }
     if long && ctx.section.is_none() {
-        let defaults = config.defaults_options();
+        let defaults = ws.defaults_options();
         if !defaults.is_empty() {
             text.push('\n');
             text.push_str(&paint("(*) defaults", Style::Heading, ctx.color));
@@ -458,8 +399,11 @@ fn list(ctx: &Ctx, long: bool, names_only: bool) -> Result<i32> {
 }
 
 fn show(ctx: &Ctx, names: &[String]) -> Result<i32> {
-    let file = ctx.load()?;
-    let shown = file.config.show(names)?;
+    let ws = ctx.load_read()?;
+    let (shown, warnings) = ws.show(names)?;
+    for w in &warnings {
+        ctx.warn(w);
+    }
     if ctx.json {
         out::line(&to_json(&shown));
         return Ok(0);
@@ -481,15 +425,17 @@ fn show(ctx: &Ctx, names: &[String]) -> Result<i32> {
 #[derive(Serialize)]
 struct JsonDump<'a> {
     path: String,
+    file: std::path::PathBuf,
     text: &'a str,
 }
 
 fn dump(ctx: &Ctx) -> Result<i32> {
-    let file = ctx.load()?;
-    let text = file.config.dump();
+    let mut ws = ctx.load_read()?;
+    let (i, text) = ws.dump(ctx.file())?;
     if ctx.json {
         out::line(&to_json(&JsonDump {
-            path: ctx.path.display().to_string(),
+            path: ws.files[i].path.display().to_string(),
+            file: ws.abs(i),
             text: &text,
         }));
     } else if ctx.color {
@@ -501,11 +447,11 @@ fn dump(ctx: &Ctx) -> Result<i32> {
 }
 
 fn search(ctx: &Ctx, pattern: &str, fixed: bool) -> Result<i32> {
-    let file = ctx.load()?;
-    let rows = file.config.search(pattern, fixed, &ctx.env)?;
+    let ws = ctx.load_read()?;
+    let rows = ws.search(pattern, fixed, &ctx.env)?;
     let code = if rows.is_empty() { 1 } else { 0 };
     if ctx.json {
-        out::line(&json_rows(&rows));
+        out::line(&to_json(&rows));
         return Ok(code);
     }
     if rows.is_empty() {
@@ -515,12 +461,12 @@ fn search(ctx: &Ctx, pattern: &str, fixed: bool) -> Result<i32> {
     let matcher = rustorm_core::Matcher::new(pattern, fixed)?;
     let width = rows
         .iter()
-        .map(|r| r.name.chars().count())
+        .map(|r| r.row.name.chars().count())
         .max()
         .unwrap_or(0);
     let mut text = String::new();
     for r in &rows {
-        let plain = format!("{:<width$} -> {}", r.name, r.target());
+        let plain = format!("{:<width$} -> {}", r.row.name, r.row.target());
         text.push_str(&out::highlight(
             &plain,
             &matcher.find_ranges(&plain),
@@ -533,10 +479,9 @@ fn search(ctx: &Ctx, pattern: &str, fixed: bool) -> Result<i32> {
 }
 
 fn alias(ctx: &Ctx, name: &str, aliases: &[String]) -> Result<i32> {
-    let mut file = ctx.load()?;
-    let names = file.config.alias(name, aliases)?;
-    ctx.save(&mut file)?;
-    ctx.say(&format!("{} now answers to: {}", names[0], names.join(" ")));
+    let mut ws = ctx.load()?;
+    let change = ws.alias(name, aliases, ctx.file())?;
+    ctx.finish(&mut ws, change)?;
     Ok(0)
 }
 
@@ -546,20 +491,15 @@ fn unalias(ctx: &Ctx, args: &[String]) -> Result<i32> {
     } else {
         (None, args)
     };
-    let mut file = ctx.load()?;
-    let result = file.config.unalias(host, aliases)?;
-    ctx.save(&mut file)?;
-    ctx.say(&format!(
-        "{} now answers to: {}",
-        result.host,
-        result.names.join(" ")
-    ));
+    let mut ws = ctx.load()?;
+    let change = ws.unalias(host, aliases, ctx.file())?;
+    ctx.finish(&mut ws, change)?;
     Ok(0)
 }
 
 fn sections(ctx: &Ctx) -> Result<i32> {
-    let file = ctx.load()?;
-    let list = file.config.sections();
+    let ws = ctx.load_read()?;
+    let list = ws.sections();
     if ctx.json {
         out::line(&to_json(&list));
         return Ok(0);
@@ -573,8 +513,15 @@ fn sections(ctx: &Ctx) -> Result<i32> {
         .map(|s| s.name.chars().count())
         .max()
         .unwrap_or(0);
+    let multi = ws.is_multi();
     let mut text = String::new();
-    for s in list {
+    let mut current: Option<usize> = None;
+    for s in &list {
+        if multi && current != Some(s.index) {
+            current = Some(s.index);
+            text.push_str(&paint(&ws.display(s.index), Style::Heading, ctx.color));
+            text.push('\n');
+        }
         text.push_str(&format!("{:<width$}   {}\n", s.name, s.hosts));
     }
     out::stdout(&text);
@@ -582,21 +529,17 @@ fn sections(ctx: &Ctx) -> Result<i32> {
 }
 
 fn add_section(ctx: &Ctx, name: &str, before: Option<&str>) -> Result<i32> {
-    let mut file = ctx.load()?;
-    let added = file.config.add_section(name, before)?;
-    ctx.save(&mut file)?;
+    let mut ws = ctx.load()?;
+    let change = ws.add_section(name, before, ctx.file())?;
     if ctx.json {
-        out::line(&to_json(&added));
+        ws.save(ctx.write)?;
+        for w in &change.warnings {
+            ctx.warn(w);
+        }
+        out::line(&to_json(&change.value));
         return Ok(0);
     }
-    match (&added.before, &added.catch_all) {
-        (Some(b), _) => ctx.say(&format!("section {name} added before {b}.")),
-        (None, Some((catch_all, n))) => ctx.say(&format!(
-            "section {name} added; {catch_all} created with {}.",
-            plural(*n, "host")
-        )),
-        (None, None) => ctx.say(&format!("section {name} added.")),
-    }
+    ctx.finish(&mut ws, change)?;
     Ok(0)
 }
 
@@ -700,20 +643,14 @@ fn combine(
 }
 
 fn rename_section(ctx: &Ctx, old: &str, new: &str) -> Result<i32> {
-    let mut file = ctx.load()?;
-    let outcome = file.config.rename_section(old, new)?;
-    ctx.save(&mut file)?;
-    match outcome {
-        SectionRename::Renamed { from, to } => ctx.say(&format!("section {from} renamed to {to}.")),
-        SectionRename::Merged { from, into } => {
-            ctx.say(&format!("section {from} merged into {into}."))
-        }
-    }
+    let mut ws = ctx.load()?;
+    let change = ws.rename_section(old, new, ctx.file())?;
+    ctx.finish(&mut ws, change)?;
     Ok(0)
 }
 
 fn backup(ctx: &Ctx, dest: Option<&std::path::Path>) -> Result<i32> {
-    let file = ctx.load()?;
+    let file = ConfigFile::load(&ctx.path)?;
     if !file.existed {
         return Err(Error::Read {
             path: ctx.path.clone(),
@@ -730,8 +667,9 @@ fn backup(ctx: &Ctx, dest: Option<&std::path::Path>) -> Result<i32> {
 }
 
 fn check(ctx: &Ctx) -> Result<i32> {
-    let file = ctx.load()?;
-    let report = file.config.check(&ctx.env);
+    // Unreadable includes are reported as problems, not load warnings.
+    let ws = ctx.load()?;
+    let report = ws.check(&ctx.env);
     let code = if report.is_clean() { 0 } else { 1 };
     if ctx.json {
         out::line(&to_json(&report));
@@ -745,4 +683,145 @@ fn check(ctx: &Ctx) -> Result<i32> {
     text.push('\n');
     out::stdout(&text);
     Ok(code)
+}
+
+/// One line of the `includes` listing before the count column is aligned.
+enum IncludeLine {
+    /// `<file>: Include <patterns>` or `matches no files`: printed as is.
+    Plain(String),
+    /// A matched file: its indented path and what follows the column.
+    File(String, FileCount),
+}
+
+enum FileCount {
+    Hosts(usize),
+    Text(String),
+}
+
+/// Appends the lines of `matches` (one level of the Include tree) to
+/// `lines`, grouping the patterns of one `Include` line under one heading.
+fn include_lines(ws: &Workspace, matches: &[IncludeMatch], lines: &mut Vec<IncludeLine>) {
+    let mut last: Option<(&std::path::Path, usize)> = None;
+    for m in matches {
+        let indent = "    ".repeat(m.depth);
+        if last != Some((m.from.as_path(), m.line)) {
+            last = Some((m.from.as_path(), m.line));
+            lines.push(IncludeLine::Plain(format!(
+                "{indent}{}: Include {}",
+                ws.display_path(&m.from),
+                m.directive
+            )));
+        }
+        if m.matches_nothing || m.files.is_empty() {
+            lines.push(IncludeLine::Plain(format!("{indent}  matches no files")));
+            continue;
+        }
+        for f in &m.files {
+            let path = format!("{indent}  {}", ws.display_path(&f.path));
+            let count = match &f.status {
+                IncludeStatus::Loaded { hosts } => FileCount::Hosts(*hosts),
+                IncludeStatus::AlreadyLoaded => FileCount::Text("already loaded".to_string()),
+                IncludeStatus::Unreadable { reason } => {
+                    FileCount::Text(format!("cannot read ({reason})"))
+                }
+            };
+            lines.push(IncludeLine::File(path, count));
+            for n in &f.nested {
+                include_lines(ws, std::slice::from_ref(n), lines);
+            }
+        }
+    }
+}
+
+/// One `--json includes` object, fields in docs/cli.md order.
+#[derive(Serialize)]
+struct JsonInclude<'a> {
+    pattern: &'a str,
+    from: std::path::PathBuf,
+    file: Option<std::path::PathBuf>,
+    hosts: usize,
+    nested: Vec<JsonInclude<'a>>,
+}
+
+fn json_includes(m: &IncludeMatch) -> Vec<JsonInclude<'_>> {
+    let from = rustorm_core::absolute_path(&m.from);
+    if m.files.is_empty() {
+        return vec![JsonInclude {
+            pattern: &m.pattern,
+            from,
+            file: None,
+            hosts: 0,
+            nested: Vec::new(),
+        }];
+    }
+    m.files
+        .iter()
+        .map(|f| JsonInclude {
+            pattern: &m.pattern,
+            from: from.clone(),
+            file: Some(rustorm_core::absolute_path(&f.path)),
+            hosts: match f.status {
+                IncludeStatus::Loaded { hosts } => hosts,
+                _ => 0,
+            },
+            nested: f.nested.iter().flat_map(json_includes).collect(),
+        })
+        .collect()
+}
+
+fn includes(ctx: &Ctx) -> Result<i32> {
+    let ws = ctx.load()?;
+    if ctx.json {
+        let rows: Vec<JsonInclude> = ws.includes.iter().flat_map(json_includes).collect();
+        out::line(&to_json(&rows));
+        return Ok(0);
+    }
+    if ws.includes.is_empty() {
+        out::line(&format!("no Include lines in {}", ws.display(0)));
+        return Ok(0);
+    }
+    let mut lines = Vec::new();
+    include_lines(&ws, &ws.includes, &mut lines);
+    let path_width = lines
+        .iter()
+        .filter_map(|l| match l {
+            IncludeLine::File(p, _) => Some(p.chars().count()),
+            IncludeLine::Plain(_) => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let digits = lines
+        .iter()
+        .filter_map(|l| match l {
+            IncludeLine::File(_, FileCount::Hosts(n)) => Some(n.to_string().len()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(1);
+    let mut text = String::new();
+    for l in &lines {
+        match l {
+            IncludeLine::Plain(s) => text.push_str(s),
+            IncludeLine::File(p, count) => {
+                let pad = path_width - p.chars().count();
+                let tail = match count {
+                    FileCount::Hosts(n) => {
+                        let word = if *n == 1 { "host" } else { "hosts" };
+                        format!("{n:>digits$} {word}")
+                    }
+                    FileCount::Text(t) => t.clone(),
+                };
+                text.push_str(&format!("{p}{}  {tail}", " ".repeat(pad)));
+            }
+        }
+        text.push('\n');
+    }
+    let (files, hosts) = ws.include_summary();
+    text.push_str(&format!(
+        "{}, {}.\n",
+        plural(files, "file"),
+        plural(hosts, "host")
+    ));
+    out::stdout(&text);
+    Ok(0)
 }

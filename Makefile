@@ -61,7 +61,7 @@ test-unit:  ## Run rustorm-core's library tests only (fast)
 	@./makehelp.sh test -p rustorm-core --lib
 
 .PHONY: test-core
-test-core:  ## Run every rustorm-core test (model, ops, combine, io, lexer)
+test-core:  ## Run every rustorm-core test (model, ops, combine, include, workspace, io, lexer)
 	@./makehelp.sh test -p rustorm-core
 
 .PHONY: test-cli

@@ -22,7 +22,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_backup: bool,
 
-    /// Emit JSON on list, show, dump, search and check
+    /// Emit JSON on list, show, dump, search, check and includes
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -37,6 +37,17 @@ pub struct Cli {
     /// Section for add, edit, clone, move and list
     #[arg(short, long, global = true, value_name = "NAME")]
     pub section: Option<String>,
+
+    /// The workspace file to write (or dump), overriding routing: a loaded
+    /// file's name such as cypress, or a path
+    #[arg(
+        id = "workspace_file",
+        short = 'f',
+        long = "file",
+        global = true,
+        value_name = "NAME|FILE"
+    )]
+    pub file: Option<String>,
 
     /// Print the version and exit
     #[arg(short = 'V', long, global = true)]
@@ -249,6 +260,8 @@ pub enum Cmd {
     /// Report problems in the config file
     #[command(visible_alias = "lint")]
     Check,
+    /// List the Include lines, the files they load and their host counts
+    Includes,
     /// Print a shell completion script
     Completion {
         /// Shell
@@ -283,6 +296,7 @@ impl Cmd {
             Cmd::RenameSection { .. } => "rename-section",
             Cmd::Backup { .. } => "backup",
             Cmd::Check => "check",
+            Cmd::Includes => "includes",
             Cmd::Completion { .. } => "completion",
             Cmd::Version => "version",
         }
@@ -297,6 +311,27 @@ impl Cmd {
                 | Cmd::Clone { .. }
                 | Cmd::Move { .. }
                 | Cmd::List { .. }
+        )
+    }
+
+    /// True when the command takes `-f, --file`: the writes (the host
+    /// edits pick which definition to change with it) and `dump`.
+    pub fn takes_file(&self) -> bool {
+        matches!(
+            self,
+            Cmd::Add { .. }
+                | Cmd::Edit { .. }
+                | Cmd::Set { .. }
+                | Cmd::Unset { .. }
+                | Cmd::Clone { .. }
+                | Cmd::Move { .. }
+                | Cmd::Delete { .. }
+                | Cmd::DeleteAll { .. }
+                | Cmd::Alias { .. }
+                | Cmd::Unalias { .. }
+                | Cmd::AddSection { .. }
+                | Cmd::RenameSection { .. }
+                | Cmd::Dump
         )
     }
 }

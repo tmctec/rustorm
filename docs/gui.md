@@ -77,3 +77,15 @@ Cmd on macOS, Ctrl on Linux and Windows.
 | Cmd/Ctrl+1, Cmd/Ctrl+2 | Hosts tab, Editor tab |
 | Esc | Cancel: close an alert or dialog, or close the form when no text field has focus |
 | Return | Activate the focused button; alerts focus Cancel |
+
+## Files
+
+On a workspace of several files (see `cli.md`, Included files) the GUI shows every file and edits them one at a time. On a workspace of one file none of this appears and the window is as described above.
+
+- **Sidebar.** Below the sections, a Files list: the root first, then every included file in load order, each with its host count and a `•` while it has unsaved edits. Selecting a file shows only its hosts, ANDed with the other filters, and selects it in the editor; a second click clears it. An unreadable file shows "cannot read" in weak text and cannot be selected. The section rows show every file's sections; a section name held by two files shows once per file, with the file name in weak text.
+- **Host table.** A **file** column comes first, showing the file name of the file that holds the host. It sorts and filters like the other columns.
+- **Editor.** A file selector above the editor lists the files in load order, with `•` on each file with unsaved edits. The editor holds one buffer per file; switching files keeps each buffer's text and cursor. **Show in Editor** in the detail panel opens the host in the editor: it selects the file that holds it and puts the cursor on its `Host` line.
+- **Save.** Save (Cmd/Ctrl+S) writes only the selected file, after its own backup (see `cli.md`, Included files: `<file>~`, or `<dir>/.<name>~` when an `Include` pattern would load `<file>~`). Discard Changes and Reload from Disk act on the selected file.
+- **Forms.** The detail panel writes to the file the CLI would pick (see `cli.md`, Included files), and the status bar names that file. A section name held by two files is refused inline with the CLI's message. The editor guard holds while any file has unsaved edits.
+- **Title and status bar.** The title reads `rustorm — <root path> — <selected file>`, with the `•` suffix while any file has unsaved edits. The status bar shows the selected file's path and its backup path.
+- **Quit.** Closing the window or quitting with unsaved edits in several files shows one alert listing them all, with Save All, Don't Save (Discard All on Linux and Windows) and Cancel. A refused save keeps the window open on that file.

@@ -137,6 +137,48 @@ pub enum Error {
         source: std::io::Error,
     },
 
+    /// `add` on a name that exists in a workspace of several files.
+    #[error("{name} already exists in {file}. Use rustorm edit or rustorm set to modify it.")]
+    HostExistsIn {
+        /// The host name.
+        name: String,
+        /// The file holding it, as text output prints paths.
+        file: String,
+    },
+
+    /// A section name held by two or more workspace files, named by a write
+    /// without `--file`.
+    #[error("section {name} exists in {}. Say which with --file.", join_and(.files))]
+    AmbiguousSection {
+        /// The section name as given.
+        name: String,
+        /// The files holding it, in load order, as text output prints them.
+        files: Vec<String>,
+    },
+
+    /// A `--file` bare name matching two or more loaded files.
+    #[error("file {name} matches {}. Give a path.", join_and(.files))]
+    AmbiguousFile {
+        /// The name as given.
+        name: String,
+        /// The matching files, in load order, as text output prints them.
+        files: Vec<String>,
+    },
+
+    /// A `--file` that names no workspace file and that no `Include`
+    /// pattern matches.
+    #[error("no such file {0} in the workspace.")]
+    UnknownFile(String),
+
+    /// A write routed to an included file that cannot be read (D24).
+    #[error("cannot read {file} ({reason}).")]
+    UnreadableInclude {
+        /// The file, as text output prints paths.
+        file: String,
+        /// Why, for example `permission denied`.
+        reason: String,
+    },
+
     /// rustorm's own TOML config does not parse.
     #[error("invalid rustorm config {path}: {reason}")]
     UserConfig {
@@ -168,13 +210,29 @@ impl Error {
             | Error::AliasNotFound(_)
             | Error::NotAnAliasOf { .. }
             | Error::PrimaryName(_)
-            | Error::ForbiddenKey(_) => 1,
+            | Error::ForbiddenKey(_)
+            | Error::HostExistsIn { .. }
+            | Error::AmbiguousSection { .. }
+            | Error::AmbiguousFile { .. }
+            | Error::UnknownFile(_) => 1,
             Error::MoveNeedsTarget
             | Error::InvalidPattern { .. }
             | Error::OddKeyValues
             | Error::InvalidOption(_)
             | Error::Usage(_) => 2,
-            Error::Read { .. } | Error::Write { .. } | Error::UserConfig { .. } => 3,
+            Error::Read { .. }
+            | Error::Write { .. }
+            | Error::UserConfig { .. }
+            | Error::UnreadableInclude { .. } => 3,
         }
+    }
+}
+
+/// Joins `a`, `a and b`, `a, b and c`.
+pub fn join_and(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
     }
 }

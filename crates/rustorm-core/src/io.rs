@@ -107,8 +107,13 @@ impl ConfigFile {
     /// Writes the model to disk (see [`write_text`]) and records the new
     /// text as the original.
     pub fn save(&mut self, options: WriteOptions) -> Result<()> {
+        self.save_with_backup(options, &backup_path(&self.path))
+    }
+
+    /// [`ConfigFile::save`] with the backup written to `backup`.
+    pub fn save_with_backup(&mut self, options: WriteOptions, backup: &Path) -> Result<()> {
         let text = self.config.render();
-        write_text(&self.path, &text, options)?;
+        write_text_with_backup(&self.path, &text, options, backup)?;
         self.original = text;
         self.existed = true;
         Ok(())
@@ -117,8 +122,18 @@ impl ConfigFile {
     /// Replaces the file with `text` (for editors that edit the raw file),
     /// re-parses it into the model, and writes it like [`ConfigFile::save`].
     pub fn save_text(&mut self, text: &str, options: WriteOptions) -> Result<()> {
+        self.save_text_with_backup(text, options, &backup_path(&self.path))
+    }
+
+    /// [`ConfigFile::save_text`] with the backup written to `backup`.
+    pub fn save_text_with_backup(
+        &mut self,
+        text: &str,
+        options: WriteOptions,
+        backup: &Path,
+    ) -> Result<()> {
         self.config = Config::parse(text)?;
-        write_text(&self.path, text, options)?;
+        write_text_with_backup(&self.path, text, options, backup)?;
         self.original = text.to_string();
         self.existed = true;
         Ok(())
@@ -180,6 +195,28 @@ fn create_dirs(dir: &Path) -> std::io::Result<()> {
 /// file's mode (0600 for a new file) and is renamed over `path`. A missing
 /// directory is created with mode 0700.
 pub fn write_text(path: &Path, text: &str, options: WriteOptions) -> Result<()> {
+    write_text_with_backup(path, text, options, &backup_path(path))
+}
+
+/// The dot backup path for `path`: `<dir>/.<name>~`. A workspace backs up
+/// an included file there when `<file>~` would match an `Include` pattern,
+/// since a glob never matches a leading dot.
+pub fn dot_backup_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    path.with_file_name(format!(".{name}~"))
+}
+
+/// [`write_text`] with the backup written to `backup` instead of
+/// `<path>~`.
+pub fn write_text_with_backup(
+    path: &Path,
+    text: &str,
+    options: WriteOptions,
+    backup: &Path,
+) -> Result<()> {
     let target = match fs::canonicalize(path) {
         Ok(p) => p,
         Err(_) => path.to_path_buf(),
@@ -196,8 +233,7 @@ pub fn write_text(path: &Path, text: &str, options: WriteOptions) -> Result<()> 
     create_dirs(&dir).map_err(|e| write_error(&dir, e))?;
     let existing = fs::metadata(&target).ok();
     if existing.is_some() && !options.no_backup {
-        let backup = backup_path(path);
-        fs::copy(&target, &backup).map_err(|e| write_error(&backup, e))?;
+        fs::copy(&target, backup).map_err(|e| write_error(backup, e))?;
     }
     let mode = existing.as_ref().map_or(0o600, mode_of);
     let mut tmp = tempfile::Builder::new()
@@ -213,4 +249,40 @@ pub fn write_text(path: &Path, text: &str, options: WriteOptions) -> Result<()> 
     tmp.persist(&target)
         .map_err(|e| write_error(&target, e.error))?;
     Ok(())
+}
+
+/// `path` made absolute against the current directory; symlinks are not
+/// resolved, so `~/.ssh/config.d` stays as written.
+pub fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|d| d.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+/// `path` as text output prints it: the home directory shown as `~`
+/// (`~/.ssh/config.d/cypress`), anything else as is. `--json` output
+/// carries [`absolute_path`] instead.
+///
+/// ```
+/// use std::path::Path;
+/// let home = Path::new("/home/me");
+/// assert_eq!(rustorm_core::display_path(Path::new("/home/me/.ssh/config"), Some(home)), "~/.ssh/config");
+/// assert_eq!(rustorm_core::display_path(Path::new("/etc/ssh/ssh_config"), Some(home)), "/etc/ssh/ssh_config");
+/// ```
+pub fn display_path(path: &Path, home: Option<&Path>) -> String {
+    let abs = absolute_path(path);
+    if let Some(home) = home.filter(|h| !h.as_os_str().is_empty()) {
+        if let Ok(rest) = abs.strip_prefix(home) {
+            return if rest.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{}", rest.display())
+            };
+        }
+    }
+    abs.display().to_string()
 }

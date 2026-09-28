@@ -28,6 +28,10 @@ This document is the contract the implementation is built against. Each command 
 | D18 | `sections` lists sections with host counts. Not in either reference tool. | No listing command | agreed |
 | D19 | Options go anywhere on the command line, before, between or after positional arguments, for every command. | Options only before positionals | agreed |
 | D20 | No copyleft code, direct or transitive: no GPL, LGPL, AGPL, SSPL, EUPL or CC-BY-SA libraries, crates or vendored sources. Permissive only: MIT, Apache-2.0, BSD, ISC, Zlib, Unicode, MPL-2.0 at file scope. | Allow LGPL under dynamic linking | agreed |
+| D21 | rustorm follows the root's `Include` lines and works on every matched file as one workspace; a root without `Include` is a workspace of one and behaves exactly as a single file does. | Treat `Include` as opaque and edit the root only | agreed |
+| D22 | A write goes to one file: `--file` when given; else the file holding the host for an edit of an existing host; else the file holding the section for `--section`, the root when no file holds it; else the root. A section in two files is an error naming both; a host in two files is edited where ssh reads it first, with a warning. `delete-all` sweeps every file. | Write every change to the root | agreed |
+| D23 | Every `--json` row carries a `"file"` field with the absolute path of the file holding it, on a workspace of one file too. | Add the field only when more than one file is loaded | agreed |
+| D24 | An included file that cannot be read is skipped by read commands with a warning; a write routed to it fails with exit 3. | Fail every command while any include is unreadable | agreed |
 
 ## Synopsis
 
@@ -41,10 +45,11 @@ rustorm [GLOBAL OPTIONS] <COMMAND> [ARGS]
 |---|---|
 | `-c, --config <FILE>` | Operate on `FILE` instead of `~/.ssh/config`. |
 | `--no-backup` | Do not write `<config>~` before changing the file. |
-| `--json` | Emit JSON instead of text on `list`, `show`, `dump`, `search`, `check`. This is the machine interface; there is no web API. |
+| `--json` | Emit JSON instead of text on `list`, `show`, `dump`, `search`, `check`, `includes`. This is the machine interface; there is no web API. |
 | `--no-color` | Disable ANSI color. `NO_COLOR` in the environment does the same. |
 | `-q, --quiet` | Suppress success messages. Errors still print. |
 | `-s, --section <NAME>` | Section for `add`, `edit`, `clone`, `move` and `list`; accepted before or after the command. |
+| `-f, --file <NAME\|FILE>` | The workspace file for `add`, `edit`, `clone`, `move`, `set`, `unset`, `delete`, `alias`, `unalias`, `add-section`, `rename-section`, `delete-all` and `dump`, overriding routing (see Included files); every other command refuses it with exit 2. `NAME` is a loaded file's name, such as `cypress`; anything else is a path. |
 | `-V, --version` | Print the version and exit. |
 | `-h, --help` | Print help and exit. |
 
@@ -75,6 +80,7 @@ Canonical name first. Every alias in the third column is accepted on the command
 | `rename-section` | — | — | — | F-21 |
 | `add-section` | — | — | — | F-53 |
 | `combine` | — | — | `merge` | F-52 |
+| `includes` | — | — | — | F-54 |
 | `version` | `version` | — | — | F-18 |
 
 F-NN ids refer to `docs/features.md`.
@@ -140,6 +146,92 @@ A section groups hosts under a banner comment. A banner is only comments, so the
 - `delete-all` removes hosts and leaves the banners, so the sections survive empty.
 - `rename-section` rewrites the banner; `sections` lists them; `add-section` creates an empty one.
 - `combine` merges sections by name: hosts from a same-named section in a later file join it; a section only a later file has is created before the catch-all; a later file's unsectioned hosts join the catch-all.
+
+## Included files
+
+rustorm follows the root config's `Include` lines the way ssh does and works on the root and every file they load as one **workspace** (D21). The root is `~/.ssh/config`, or the file `--config` names. A root without `Include` is a workspace of one file, and every command behaves exactly as the rest of this document describes: no file headings, no ` in <file>` in messages, the same bytes written.
+
+The examples in this chapter use this workspace:
+
+```
+~/.ssh/config               Include ~/.ssh/config.d/*; host github
+~/.ssh/config.d/cypress     hosts cypressPro, cypressPro-ext
+~/.ssh/config.d/df-austin   section data foundry: db1, dcaustin-pfsense
+~/.ssh/config.d/ranch       Include ranch.d/*; hosts dcevant, ranch-nas
+~/.ssh/ranch.d/lab          host lab-1
+```
+
+**Resolution.**
+
+- An `Include` line takes one or more patterns separated by whitespace. Each pattern is an absolute path, a path starting with `~/` (the home directory), or a path relative to `~/.ssh`, also when `--config` names a root elsewhere.
+- A pattern may hold glob characters (`*`, `?`, `[...]`). Its matches load in lexical order of their paths. A pattern that matches nothing loads nothing and is not an error. Only regular files load; a matched directory is skipped.
+- An included file's own `Include` lines are followed the same way. A file already in the workspace is not loaded again, so an `Include` cycle ends at the first repeat.
+- **Load order** is the order ssh opens the files: the root first, then each `Include`'s matches where the line stands, depth first. Headings, the `includes` listing and the editors' file lists follow it.
+- An `Include` inside `Host *` is treated as global: its files load as if the line stood at the top level, since `Host *` matches every host. `check` notes it.
+- `Match` blocks stay opaque. rustorm never edits an `Include` line.
+- The paths in text output show the home directory as `~`. The `"file"` field of `--json` output carries the absolute path.
+
+**Reading.** Every command sees every host of the workspace: `list`, `show`, `search`, `check` and completion cover all files, and a host name is unique across the workspace for `add`, `clone`, `move` and `alias`. `list` and `sections` print a heading per file (see those commands). `dump` prints the root; `--file` makes it print another file. Every `--json` row carries a `"file"` field, on a workspace of one file too (D23).
+
+**Routing.** A write goes to one file, chosen in this order (D22):
+
+| Change | File written |
+|---|---|
+| Any command given `-f, --file` | The file `--file` names. |
+| An edit of an existing host: `edit`, `set`, `unset`, `alias`, `unalias`, `delete`, a `move` rename | The file that holds the host. |
+| `add`, `clone`, `move` with `--section` | The file that holds the section. A section in no file is created in the root. |
+| `add` without `--section` | The root, in its catch-all when it has sections. |
+| `clone` without `--section` | The source's file and section. |
+| `rename-section` | The file that holds the section. |
+| `add-section` | The root. |
+| `delete-all` | Every file of the workspace. |
+
+- **Section in two files.** A section name held by two files is ambiguous for every write that names it, and the command fails with exit 1 before writing: `error: section lab exists in ~/.ssh/config.d/cypress and ~/.ssh/config.d/gke. Say which with --file.` Each file keeps its own sections and its own catch-all (D17 applies per file), so two files each with an `other` section make `--section other` need `--file`.
+- **Host in two files.** When two files define the same host name, the edit goes to the first definition in ssh's reading order, the one ssh uses, and a warning on stderr names the others: `warning: dcaustin-pfsense is also defined in ~/.ssh/config.d/df-austin.bak.20260628232757; ssh uses the first.` `--file` picks another definition.
+- **Moving between files.** A `move` whose destination section is in another file removes the entry from its file and writes it into the destination, comments included. The destination is written first, so a failure never loses the host.
+- **Backups.** Each file written is backed up to its own `<file>~` first (D2). When an `Include` pattern would match that `<file>~`, the backup goes to `<dir>/.<name>~` instead (`~/.ssh/config.d/.cypress~`), since a glob never matches a leading dot, so neither ssh nor rustorm loads it. A move between files writes two files and two backups.
+- **Unreadable include.** A matched file rustorm cannot read is skipped by read commands with `warning: cannot read ~/.ssh/config.d/private (permission denied); skipped.` on stderr. A write routed to it fails with `error: cannot read ~/.ssh/config.d/private (permission denied).` and exit 3 (D24).
+
+**`--file`.** `-f, --file <NAME|FILE>` names a workspace file. A bare `NAME` matches the file name of one loaded file (`cypress` is `~/.ssh/config.d/cypress`, `config` is the root); anything else is a path, `~/` expanded and relative to the current directory. A path not in the workspace is accepted only when one of the workspace's `Include` patterns matches it; the file is then created with mode `0600`. Otherwise the command fails with exit 1: `error: no such file nas in the workspace.` A bare name matching two loaded files fails with `error: file lab matches ~/.ssh/ranch.d/lab and ~/.ssh/work/lab. Give a path.` On a workspace of one file, `--file` must name the root. `--file` applies to `add`, `edit`, `clone`, `move`, `add-section`, `rename-section`, `delete-all` and `dump`.
+
+**Messages.** On a workspace of more than one file, success messages name the file written. Each example starts from the workspace above:
+
+```
+$ rustorm add db2 postgres@db2.example.com --section "data foundry"
+db2 added to section data foundry in ~/.ssh/config.d/df-austin. Connect with: ssh db2
+
+$ rustorm add vps root@vps.example.com:2222
+vps added in ~/.ssh/config. Connect with: ssh vps
+
+$ rustorm set cypressPro-ext User deploy
+cypressPro-ext updated in ~/.ssh/config.d/cypress.
+
+$ rustorm move dcevant --section "data foundry"
+dcevant moved from ~/.ssh/config.d/ranch to section data foundry in ~/.ssh/config.d/df-austin.
+
+$ rustorm move ranch-nas nas
+ranch-nas renamed to nas in ~/.ssh/config.d/ranch. Connect with: ssh nas
+
+$ rustorm delete lab-1
+lab-1 deleted from ~/.ssh/ranch.d/lab.
+
+$ rustorm alias cypressPro cp
+cypressPro in ~/.ssh/config.d/cypress now answers to: cypressPro cp
+
+$ rustorm add-section evant --file ~/.ssh/config.d/df-evant
+section evant added to ~/.ssh/config.d/df-evant.
+
+$ rustorm rename-section "data foundry" dfa
+section data foundry renamed to dfa in ~/.ssh/config.d/df-austin.
+
+$ rustorm add db1 postgres@db1.example.com
+error: db1 already exists in ~/.ssh/config.d/df-austin. Use rustorm edit or rustorm set to modify it.
+
+$ rustorm delete-all --yes
+8 hosts deleted from 5 files.
+```
+
+`set --regex` reports `3 hosts updated in 2 files: cypressPro, cypressPro-ext, dcevant`. `delete-all` asks `Delete 8 hosts from 5 files? [y/N]`; with `--file` it sweeps that file alone and names it as on a single file. Errors that name no host or section keep their single-file text.
 
 ## Commands
 
@@ -408,7 +500,7 @@ rustorm delete-all [-y]
 
 **Description**
 
-Removes every host entry. Comments, blank lines, section banners and the `Host *` defaults section stay. On a terminal the command asks `Delete 14 hosts from ~/.ssh/config? [y/N]`; without a terminal it refuses unless `-y, --yes` is given (D8).
+Removes every host entry. Comments, blank lines, section banners and the `Host *` defaults section stay. On a terminal the command asks `Delete 14 hosts from ~/.ssh/config? [y/N]`; without a terminal it refuses unless `-y, --yes` is given (D8). On a workspace of several files it sweeps every file and asks `Delete 8 hosts from 5 files? [y/N]`; `--file` limits it to one file.
 
 **Examples**
 
@@ -437,7 +529,7 @@ rustorm list [-l] [-n]
 
 **Description**
 
-Prints one line per host, sorted by name, in the form `name -> user@hostname:port`. User and port fall back to the `Host *` defaults, then to `$USER` and `22`. A host without `HostName` shows `[no hostname]`.
+Prints one line per host, sorted by name, in the form `name -> user@hostname:port`. User and port fall back to the `Host *` defaults, then to `$USER` and `22`. A host without `HostName` shows `[no hostname]`. On a workspace of several files the hosts are grouped by file in load order, each group under a heading with the file's path, and a file's section headings follow its path heading; a file without hosts has no heading. `--json` rows carry the `"file"` field (D23).
 
 **Options**
 
@@ -474,10 +566,30 @@ github -> git@github.com:22
 vps    -> root@vps.example.com:2222
 
 $ rustorm --json list
-[{"name":"db1","section":"data foundry","aliases":[],"hostname":"db1.example.com","user":"postgres","port":22,"options":{}}, ...]
+[{"name":"db1","file":"/home/me/.ssh/config","section":"data foundry","aliases":[],"hostname":"db1.example.com","user":"postgres","port":22,"options":{}}, ...]
 ```
 
-The section headings appear only when the file has sections.
+The section headings appear only when the file has sections. On the workspace of Included files:
+
+```
+$ rustorm list
+~/.ssh/config
+github           -> git@github.com:22
+~/.ssh/config.d/cypress
+cypressPro       -> travis@10.10.0.2:22
+cypressPro-ext   -> travis@cypress.example.com:22
+~/.ssh/config.d/df-austin
+[data foundry]
+db1              -> postgres@db1.example.com:22
+dcaustin-pfsense -> admin@10.20.0.1:22
+~/.ssh/config.d/ranch
+dcevant          -> travis@dcevant.ranch.lan:22
+ranch-nas        -> travis@nas.ranch.lan:22
+~/.ssh/ranch.d/lab
+lab-1            -> travis@10.30.0.5:22
+```
+
+The arrows align across the whole listing. `--section` keeps every file that holds the section.
 
 **Exit status**
 
@@ -527,7 +639,7 @@ rustorm dump
 
 **Description**
 
-Prints the whole config file as rustorm parsed it, with `Host` lines and keys colored on a terminal. Useful to confirm the parser preserves the file byte for byte.
+Prints the whole config file as rustorm parsed it, with `Host` lines and keys colored on a terminal. Useful to confirm the parser preserves the file byte for byte. On a workspace of several files it prints the root; `--file` prints another workspace file.
 
 **Examples**
 
@@ -641,7 +753,13 @@ rustorm sections
 
 **Description**
 
-Lists sections in file order with their host counts; the last one is the catch-all. Prints `no sections` on an unsectioned file.
+Lists sections in file order with their host counts; the last one is the catch-all. Prints `no sections` on an unsectioned file. On a workspace of several files each file with sections gets a heading with its path, in load order, and its sections follow; files without sections are left out, and `no sections` prints only when no file has one:
+
+```
+$ rustorm sections
+~/.ssh/config.d/df-austin
+data foundry   2
+```
 
 **Examples**
 
@@ -832,6 +950,50 @@ error: combine needs at least two files.
 
 0 written · 1 conflicts under `fail` · 2 usage, fewer than two files · 3 an input unreadable or the output unwritable.
 
+### includes
+
+Origin: new · Status: v1
+
+**Synopsis**
+
+```
+rustorm includes
+```
+
+**Description**
+
+Lists the workspace: every `Include` line of the root and of the files it loads, in load order, with the files each one matched and their host counts (see Included files). Each `Include` prints `<file>: Include <patterns>`, where `<file>` holds the line; its matched files follow, indented two spaces deeper, each with its host count, `Host *` excluded. A matched file's own `Include` lines follow it, two spaces deeper again. A pattern that matches nothing prints `matches no files`; a file already loaded prints `already loaded` after its path instead of a count; an unreadable one prints `cannot read (<reason>)`. The counts align in one column, right-aligned. A summary line closes the listing: `N files, H hosts.`, counting the root and every loaded file. A root without `Include` prints `no Include lines in <root>`.
+
+`--json` prints a list with one object per matched file of each root `Include`: `{"pattern": "...", "from": "...", "file": "...", "hosts": N, "nested": [...]}`, where `pattern` is the pattern as written, `from` the absolute path of the file holding the line, `file` the absolute path matched, and `nested` the same objects for that file's own `Include` lines. A pattern that matches nothing gives one object with `"file": null` and `"hosts": 0`.
+
+**Examples**
+
+```
+$ rustorm includes
+~/.ssh/config: Include ~/.ssh/config.d/*
+  ~/.ssh/config.d/cypress    2 hosts
+  ~/.ssh/config.d/df-austin  2 hosts
+  ~/.ssh/config.d/ranch      2 hosts
+    ~/.ssh/config.d/ranch: Include ranch.d/*
+      ~/.ssh/ranch.d/lab     1 host
+5 files, 8 hosts.
+
+$ rustorm --json includes
+[{"pattern":"~/.ssh/config.d/*","from":"/home/me/.ssh/config","file":"/home/me/.ssh/config.d/cypress","hosts":2,"nested":[]}, ...]
+
+$ rustorm includes
+~/.ssh/config: Include ~/.ssh/work/*
+  matches no files
+1 file, 1 host.
+
+$ rustorm includes
+no Include lines in ~/.ssh/config
+```
+
+**Exit status**
+
+0 · 3 root config file unreadable.
+
 ### backup
 
 Origin: both · Status: v1
@@ -870,6 +1032,25 @@ rustorm check
 **Description**
 
 Reads the config and reports problems without changing anything: keys not in ssh_config(5), duplicate keys in one entry, hosts without `HostName`, `IdentityFile` paths that do not exist, duplicate names across entries, and lines the parser could not classify.
+
+On a workspace of several files it checks every file and also reports:
+
+- **A host defined in two files.** ssh uses the first definition it reads; the others are dead text.
+- **An `Include` that loads a backup.** A matched file whose name ends in `~`, `.bak`, `.orig` or `.old`, or contains `.bak.`, looks like a backup, and its hosts shadow or duplicate the real ones.
+- **An `Include` inside `Host *`.** rustorm and ssh both read it as global (see Included files); moving the line above `Host *` says so plainly.
+
+An included file that cannot be read is reported as a problem too (D24). The count line counts hosts across the workspace. `--json` findings carry the `"file"` field (D23).
+
+On a root whose `Include ~/.ssh/config.d/*` sits below `Host *`, with a second line `Include ~/.ssh/config.d/private` and a stray `df-austin.bak.20260628232757` holding `dcaustin-pfsense`:
+
+```
+$ rustorm check
+dcaustin-pfsense: defined in ~/.ssh/config.d/df-austin and ~/.ssh/config.d/df-austin.bak.20260628232757; ssh uses the first
+Include ~/.ssh/config.d/*: loads ~/.ssh/config.d/df-austin.bak.20260628232757, which looks like a backup
+Include ~/.ssh/config.d/*: inside Host * in ~/.ssh/config; treated as global
+Include ~/.ssh/config.d/private: cannot read (permission denied)
+4 problems in 9 hosts.
+```
 
 **Examples**
 
@@ -944,6 +1125,7 @@ rustorm 0.1.0
 |---|---|
 | `~/.ssh/config` | The file every command reads and writes. `--config` overrides it. Created with mode `0600` when missing. |
 | `~/.ssh/config~` | Backup written before every change (D2). |
+| Included files | Every file the root's `Include` lines load (see Included files). Each is written only when a change routes to it, after a backup to its own `<file>~`, or to `<dir>/.<name>~` when an `Include` pattern would match `<file>~`. |
 | rustorm config | Command aliases and defaults, TOML. Linux: `$XDG_CONFIG_HOME/rustorm/config.toml` (`~/.config/rustorm/config.toml`). macOS: `~/Library/Application Support/rustorm/config.toml`. Windows: `%AppData%\rustorm\config.toml`. |
 
 rustorm config example:
