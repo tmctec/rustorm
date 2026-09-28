@@ -25,6 +25,7 @@ use crate::include::{
     canonical, glob_match, looks_like_backup, IncludeMatch, IncludeStatus, Walked, Walker,
 };
 use crate::io::{absolute_path, display_path, ConfigFile, WriteOptions};
+use crate::keyspec::SettingChange;
 use crate::model::{HostBlock, HostLocation};
 use crate::ops::{
     apply_pairs, check_settable, clone_block, serialize_options, validate_name, AddSpec,
@@ -1125,6 +1126,24 @@ impl Workspace {
         let (names, files, warnings) =
             self.update_hosts(selector, target, |b| apply_pairs(b, pairs, append))?;
         let msg = self.updated_message(selector, &names, &files);
+        Ok(self.change(names, files, vec![msg], warnings))
+    }
+
+    /// The settings form: applies every change to host `name` in the file
+    /// that holds it (see [`Config::apply_settings`](crate::Config::apply_settings)).
+    pub fn apply_settings(
+        &mut self,
+        name: &str,
+        changes: &[SettingChange],
+        file: Option<&str>,
+    ) -> Result<Change<Vec<String>>> {
+        crate::ops::check_settings(changes)?;
+        let target = self.target(file)?;
+        let selector = HostSelector::Name(name.to_string());
+        let (names, files, warnings) = self.update_hosts(&selector, target, |b| {
+            crate::ops::apply_settings(b, changes)
+        })?;
+        let msg = self.updated_message(&selector, &names, &files);
         Ok(self.change(names, files, vec![msg], warnings))
     }
 

@@ -6,9 +6,8 @@ use std::path::PathBuf;
 
 use rustorm_core::{
     combine as core_combine, pair_up, parse_option, resolve_config_path, write_text, AddSpec,
-    Change, CloneSpec, CombineInput, CombineReport, ConfigFile, EditSpec, Env, Error,
-    HostSelector, IncludeMatch, IncludeStatus, ListRow, OnConflict, Result, UserConfig,
-    Workspace, WriteOptions,
+    Change, CloneSpec, CombineInput, CombineReport, ConfigFile, EditSpec, Env, Error, HostSelector,
+    IncludeMatch, IncludeStatus, ListRow, OnConflict, Result, UserConfig, Workspace, WriteOptions,
 };
 use serde::Serialize;
 

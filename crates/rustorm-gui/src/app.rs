@@ -8,7 +8,8 @@ use egui::{
 };
 use egui_extras::{Column as TableColumn, TableBuilder};
 use rustorm_core::{
-    Config, Env, FileState, SectionSummary, Workspace, WorkspaceSection, WriteOptions,
+    Config, Env, FileState, KeyGroup, SectionSummary, SettingsDraft, Workspace, WorkspaceSection,
+    WriteOptions,
 };
 
 use crate::highlight::highlight_job;
@@ -172,7 +173,7 @@ pub struct App {
     current: usize,
     /// A Host line to put the editor's cursor on at the next frame.
     goto_line: Option<usize>,
-    /// The Host line the editor was last opened at.
+    /// The Host line the editor's cursor was last put on.
     editor_line: Option<usize>,
     /// The selected tab.
     pub tab: Tab,
@@ -182,6 +183,10 @@ pub struct App {
     pub filters: Filters,
     selected: Option<String>,
     form: Option<Form>,
+    /// The selected host's All settings rows, as edited.
+    settings: Option<SettingsDraft>,
+    /// The last refused All settings save.
+    settings_error: Option<String>,
     dialog: Option<Dialog>,
     editor_error: Option<String>,
     status: String,
@@ -220,6 +225,8 @@ impl App {
             filters: Filters::default(),
             selected: None,
             form: None,
+            settings: None,
+            settings_error: None,
             dialog: None,
             editor_error: None,
             status: String::new(),
@@ -285,10 +292,17 @@ impl App {
         &self.buffers[i]
     }
 
-    /// The 1-based Host line the editor was last opened at by
-    /// [`App::open_in_editor`].
+    /// The 1-based line the editor's cursor was last put on, by
+    /// [`App::open_in_editor`] or by the Editor tab showing a newly
+    /// selected host.
     pub fn editor_line(&self) -> Option<usize> {
         self.editor_line
+    }
+
+    /// The 1-based line the editor's cursor goes to when the Editor tab
+    /// next shows: the `Host` line of a newly selected host.
+    pub fn pending_editor_line(&self) -> Option<usize> {
+        self.goto_line
     }
 
     /// The loaded files' indices in load order.
@@ -485,15 +499,99 @@ impl App {
         }
     }
 
-    /// Selects `name` and opens it in the detail form.
+    /// Selects `name` and opens it in the detail form. A newly selected
+    /// host also becomes the editor's: its file is selected there and the
+    /// cursor goes to its `Host` line when the Editor tab next shows.
     pub fn select(&mut self, name: &str) {
+        if self.selected.as_deref() != Some(name) {
+            self.follow_host(name);
+        }
         self.selected = Some(name.to_string());
         self.form = self.rows.iter().find(|r| r.name == name).map(Form::edit);
+        self.settings = self.ws.find_host(name).map(|wl| {
+            let defaults = self.ws.files.iter().find_map(|f| f.config.defaults());
+            SettingsDraft::new(name, self.ws.host(wl), defaults)
+        });
+        self.settings_error = None;
+    }
+
+    /// Points the editor at host `name` without leaving the Hosts tab: its
+    /// file, and its `Host` line in that file's buffer (so unsaved edits
+    /// that moved it are honored), else the line on disk.
+    fn follow_host(&mut self, name: &str) {
+        let Some(wl) = self.ws.find_host(name) else {
+            return;
+        };
+        self.select_file(wl.file);
+        let line =
+            buffer_host_line(&self.buffers[wl.file], name).unwrap_or_else(|| self.ws.host_line(wl));
+        self.goto_line = Some(line);
+    }
+
+    /// Moves the selection `delta` rows through the visible hosts.
+    fn move_selection(&mut self, delta: isize) {
+        let names = self.visible_names();
+        if names.is_empty() {
+            return;
+        }
+        let at = self
+            .selected
+            .as_ref()
+            .and_then(|s| names.iter().position(|n| n == s));
+        let next = match at {
+            Some(i) => (i as isize + delta).clamp(0, names.len() as isize - 1) as usize,
+            None => 0,
+        };
+        let name = names[next].clone();
+        self.select(&name);
+    }
+
+    /// The selected host's All settings rows, as edited.
+    pub fn settings(&self) -> Option<&SettingsDraft> {
+        self.settings.as_ref()
+    }
+
+    /// The last refused All settings save.
+    pub fn settings_error(&self) -> Option<&str> {
+        self.settings_error.as_deref()
+    }
+
+    /// Writes the All settings changes of the selected host in one write.
+    /// Refuses a value that does not fit its keyword, and writes nothing
+    /// when nothing changed or the editor holds unsaved text.
+    pub fn save_settings(&mut self) -> bool {
+        let Some(draft) = &self.settings else {
+            return false;
+        };
+        if self.editor_dirty() {
+            return false;
+        }
+        let changes = match draft.changes() {
+            Ok(c) => c,
+            Err(e) => {
+                self.status = format!("error: {e}");
+                self.settings_error = Some(e);
+                return false;
+            }
+        };
+        if changes.is_empty() {
+            self.status = "no changes.".to_string();
+            return false;
+        }
+        let name = draft.host.clone();
+        let ok = self.run(Op::Settings { name, changes });
+        if !ok {
+            if let Some(f) = &mut self.form {
+                self.settings_error = f.error.take();
+            }
+        }
+        ok
     }
 
     /// Opens the empty add form.
     pub fn open_add(&mut self) {
         self.selected = None;
+        self.settings = None;
         self.form = Some(Form::add());
         self.tab = Tab::Hosts;
     }
@@ -819,6 +917,12 @@ impl App {
             if ctx.input(|i| i.key_pressed(Key::Escape)) {
                 self.form = None;
                 self.selected = None;
+            }
+            if ctx.input(|i| i.key_pressed(Key::ArrowDown)) {
+                self.move_selection(1);
+            }
+            if ctx.input(|i| i.key_pressed(Key::ArrowUp)) {
+                self.move_selection(-1);
             }
         }
     }
@@ -1315,6 +1419,68 @@ impl App {
                 });
             }
         }
+        if !adding {
+            self.settings_section(ui, blocked);
+        }
+    }
+
+    /// The All settings section of the detail panel: every keyword the host
+    /// can set, grouped, a control per value type (docs/gui.md).
+    fn settings_section(&mut self, ui: &mut Ui, blocked: bool) {
+        if self.settings.is_none() || self.form.is_none() {
+            return;
+        }
+        ui.separator();
+        let mut save = false;
+        let mut reset = false;
+        egui::CollapsingHeader::new("All settings")
+            .id_salt("all-settings")
+            .show(ui, |ui| {
+                let Some(draft) = self.settings.as_mut() else {
+                    return;
+                };
+                let weak = ui.visuals().weak_text_color();
+                let err = ui.visuals().error_fg_color;
+                egui::ScrollArea::vertical()
+                    .id_salt("all-settings-scroll")
+                    .max_height(460.0)
+                    .show(ui, |ui| {
+                        ui.add_enabled_ui(!blocked, |ui| {
+                            for group in KeyGroup::ALL {
+                                egui::CollapsingHeader::new(group.title())
+                                    .id_salt(("settings-group", group.title()))
+                                    .default_open(false)
+                                    .show(ui, |ui| {
+                                        settings_group(ui, draft, group, weak, err);
+                                    });
+                            }
+                        });
+                    });
+                let changes = draft.changes();
+                let pending = changes.as_ref().is_ok_and(|c| !c.is_empty());
+                ui.horizontal(|ui| {
+                    save = ui
+                        .add_enabled(!blocked && pending, Button::new("Save settings"))
+                        .clicked();
+                    reset = ui
+                        .add_enabled(draft.rows.iter().any(|r| r.changed()), Button::new("Reset"))
+                        .clicked();
+                });
+                if let Some(e) = &self.settings_error {
+                    ui.colored_label(err, format!("⚠ {e}"));
+                }
+            });
+        if save {
+            self.save_settings();
+        }
+        if reset {
+            if let Some(name) = self.selected.clone() {
+                self.selected = None;
+                let pending = self.goto_line;
+                self.select(&name);
+                self.goto_line = pending;
+            }
+        }
     }
 
     /// Every section name once, in load order, for the section buttons.
@@ -1410,6 +1576,9 @@ impl App {
             });
         if changed {
             self.editor_error = None;
+        }
+        if goto.is_some() {
+            self.editor_line = goto;
         }
     }
 
@@ -1689,5 +1858,107 @@ fn field(ui: &mut Ui, label: &str, value: &mut String, hint: &str) {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
+    }
+}
+
+/// The 1-based line of the `Host` line naming `name` in `text`.
+fn buffer_host_line(text: &str, name: &str) -> Option<usize> {
+    text.lines()
+        .position(|l| {
+            let mut words = l.split_whitespace();
+            words.next().is_some_and(|w| w.eq_ignore_ascii_case("host"))
+                && words.any(|w| w.trim_matches('"') == name)
+        })
+        .map(|i| i + 1)
+}
+
+/// One group of the All settings section: a row per value, the control
+/// fitting the keyword's type, the problem with a value under it.
+fn settings_group(
+    ui: &mut Ui,
+    draft: &mut SettingsDraft,
+    group: KeyGroup,
+    weak: Color32,
+    err: Color32,
+) {
+    let mut grow = None;
+    egui::Grid::new(("settings-grid", group.title()))
+        .num_columns(2)
+        .min_col_width(190.0)
+        .spacing([8.0, 4.0])
+        .show(ui, |ui| {
+            for (i, row) in draft.rows.iter_mut().enumerate() {
+                if row.spec.group != group {
+                    continue;
+                }
+                let key = row.spec.key;
+                let label = if row.changed() {
+                    RichText::new(format!("{key} •"))
+                } else {
+                    RichText::new(key)
+                };
+                ui.label(label);
+                let before = row.value.clone();
+                if !row.typed() {
+                    let shown = if row.value.is_empty() {
+                        match &row.inherited {
+                            Some(v) => format!("— ({v} from Host *)"),
+                            None => "—".to_string(),
+                        }
+                    } else {
+                        row.value.clone()
+                    };
+                    let resp = egui::ComboBox::from_id_salt(("setting", i))
+                        .width(220.0)
+                        .selected_text(shown)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut row.value, String::new(), "not set");
+                            for w in row.choices().unwrap_or_default() {
+                                ui.selectable_value(&mut row.value, (*w).to_string(), *w);
+                            }
+                        });
+                    set_label(ui, resp.response.id, key);
+                } else {
+                    ui.horizontal(|ui| {
+                        let hint = row
+                            .inherited
+                            .as_ref()
+                            .map(|v| format!("{v} (from Host *)"))
+                            .unwrap_or_default();
+                        let resp = ui.add(
+                            TextEdit::singleline(&mut row.value)
+                                .hint_text(RichText::new(hint).color(weak))
+                                .desired_width(220.0),
+                        );
+                        set_label(ui, resp.id, key);
+                        if let Some(words) = row.choices() {
+                            ui.menu_button("▾", |ui| {
+                                for w in words {
+                                    if ui.button(*w).clicked() {
+                                        row.value = (*w).to_string();
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        }
+                        if row.spec.multi && !row.value.is_empty() && ui.small_button("−").clicked()
+                        {
+                            row.value.clear();
+                        }
+                    });
+                }
+                ui.end_row();
+                if let Some(p) = row.problem() {
+                    ui.label("");
+                    ui.colored_label(err, format!("{key} {p}"));
+                    ui.end_row();
+                }
+                if row.value != before {
+                    grow = Some(i);
+                }
+            }
+        });
+    if let Some(i) = grow {
+        draft.grow(i);
     }
 }

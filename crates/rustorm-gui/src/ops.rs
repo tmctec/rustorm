@@ -1,6 +1,6 @@
 //! The writes the GUI makes, each a sequence of `rustorm_core` operations.
 
-use rustorm_core::{AddSpec, CloneSpec, EditSpec, Env, HostSelector, Workspace};
+use rustorm_core::{AddSpec, CloneSpec, EditSpec, Env, HostSelector, SettingChange, Workspace};
 
 /// One write the user asked for from the Hosts tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +51,14 @@ pub enum Op {
         /// The section name.
         name: String,
     },
+    /// The All settings section: sets and unsets several keys of one host
+    /// in one write.
+    Settings {
+        /// The host.
+        name: String,
+        /// One entry per keyword whose values changed.
+        changes: Vec<SettingChange>,
+    },
 }
 
 /// What a successful [`Op`] did.
@@ -72,7 +80,10 @@ impl Op {
     /// against a file changed on disk.
     pub fn hosts(&self) -> Vec<String> {
         match self {
-            Op::Add { name, .. } | Op::Delete(name) | Op::Move { name, .. } => vec![name.clone()],
+            Op::Add { name, .. }
+            | Op::Delete(name)
+            | Op::Move { name, .. }
+            | Op::Settings { name, .. } => vec![name.clone()],
             Op::Edit { original, name, .. } => vec![original.clone(), name.trim().to_string()],
             Op::Clone { source, new_name } => vec![source.clone(), new_name.trim().to_string()],
             Op::AddSection { .. } => Vec::new(),
@@ -208,6 +219,13 @@ impl Op {
                 Ok(Outcome {
                     message: said(change.messages, single),
                     select: Some(moved.new_name),
+                })
+            }
+            Op::Settings { name, changes } => {
+                let change = ws.apply_settings(name, changes, None)?;
+                Ok(Outcome {
+                    message: said(change.messages, format!("{name} updated.")),
+                    select: Some(name.clone()),
                 })
             }
             Op::AddSection { name } => {

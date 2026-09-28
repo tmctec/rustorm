@@ -1,5 +1,16 @@
 # Releases
 
+## 2026-09-28 — The editor follows you, and every setting is one keystroke away
+
+**New**
+- In the terminal UI and the desktop app, the config editor now shows whatever host you are looking at: move through the host list and the editor jumps to that host, in whichever file holds it. Browse the file list in the terminal UI and the editor shows each file as you go.
+- Press Enter on a host in the terminal UI to see every setting it can have, grouped into Connection, Authentication, Forwarding, Proxy, Multiplexing and Advanced. Yes/no and fixed-choice settings flip with the space bar or arrow keys, and everything else you type.
+- The desktop app's host panel has the same thing under All settings, with drop-downs for choices and a warning right under any value that won't work.
+- Both check every value before saving (a port has to be a number, `StrictHostKeyChecking` has to be one of its real options), then save all your changes at once with a backup. Settings your `Host *` block already supplies are shown so you know what the host inherits.
+
+**Improved**
+- In the desktop app, the Up and Down arrow keys move through the host list.
+
 ## 2026-09-28 — rustorm follows your Include lines
 
 **New**

@@ -42,6 +42,9 @@ prereqs:  ## Check and install prerequisites (rustup toolchain)
 
 ##@ Build
 
+.PHONY: all
+all: build  ## Alias for build — builds everything
+
 .PHONY: build
 build:  ## Build every workspace crate (debug): rustorm, rustorm-core, rustorm-tui, rustorm-gui
 	@./makehelp.sh build
@@ -61,7 +64,7 @@ test-unit:  ## Run rustorm-core's library tests only (fast)
 	@./makehelp.sh test -p rustorm-core --lib
 
 .PHONY: test-core
-test-core:  ## Run every rustorm-core test (model, ops, combine, include, workspace, io, lexer)
+test-core:  ## Run every rustorm-core test (model, ops, keyspec, combine, include, workspace, io, lexer)
 	@./makehelp.sh test -p rustorm-core
 
 .PHONY: test-cli
@@ -75,6 +78,13 @@ test-tui:  ## Run the rustorm-tui TestBackend and pty tests
 .PHONY: test-gui
 test-gui:  ## Run the rustorm-gui kittest suite
 	@./makehelp.sh test -p rustorm-gui
+
+GUI_WALKTHROUGH ?= target/gui-walkthrough.txt
+
+.PHONY: test-gui-walkthrough
+test-gui-walkthrough:  ## Drive the GUI follow + All settings flows and write what they show to GUI_WALKTHROUGH
+	@RUSTORM_GUI_EVIDENCE=$(abspath $(GUI_WALKTHROUGH)) ./makehelp.sh test -p rustorm-gui --test settings gui_walkthrough -- --ignored
+	@echo "walkthrough written to $(GUI_WALKTHROUGH)"
 
 ##@ Quality
 

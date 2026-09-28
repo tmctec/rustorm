@@ -8,6 +8,7 @@
 pub mod app;
 pub mod editor;
 pub mod hosts;
+mod settings;
 pub mod theme;
 
 pub use app::{App, Focus, Options};

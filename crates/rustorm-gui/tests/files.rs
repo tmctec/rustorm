@@ -474,3 +474,154 @@ fn inc_gui_4_no_include_shows_no_file_ui() {
     assert_eq!(editor_value(&h), text);
     assert!(!shown(&h, "editor file"), "no file selector");
 }
+
+// ----- the editor follows the selection (R-editor-follows) -----
+
+fn line_of(text: &str, name: &str) -> usize {
+    text.lines()
+        .position(|l| l.trim() == format!("Host {name}"))
+        .unwrap()
+        + 1
+}
+
+/// follow-gui-1: a Files row click selects that file in the editor and
+/// stays on the Hosts tab.
+#[test]
+fn follow_gui_1_files_click_selects_the_editor_file() {
+    let m = Multi::new();
+    let mut h = harness(&m.root);
+    h.run();
+    click(&mut h, "cypress  2");
+    assert_eq!(h.state().current_file(), index_of(&h, "cypress"));
+    assert_eq!(h.state().tab, Tab::Hosts);
+}
+
+/// follow-gui-2: clearing the Files filter leaves the editor on the file.
+#[test]
+fn follow_gui_2_clearing_the_files_filter_keeps_the_editor() {
+    let m = Multi::new();
+    let mut h = harness(&m.root);
+    h.run();
+    click(&mut h, "ranch  2");
+    click(&mut h, "ranch  2");
+    assert_eq!(h.state().visible_names().len(), 5);
+    assert_eq!(h.state().current_file(), index_of(&h, "ranch"));
+}
+
+/// follow-gui-3: a host row click points the editor at the host's file and
+/// Host line while the Hosts tab stays.
+#[test]
+fn follow_gui_3_host_click_points_the_editor_at_the_host() {
+    let m = Multi::new();
+    let mut h = harness(&m.root);
+    h.run();
+    click(&mut h, "ranch-nas");
+    let s = h.state();
+    assert_eq!(s.tab, Tab::Hosts);
+    assert_eq!(s.current_file(), index_of(&h, "ranch"));
+    assert_eq!(s.pending_editor_line(), Some(line_of(RANCH, "ranch-nas")));
+    click(&mut h, "github");
+    assert_eq!(h.state().current_file(), 0);
+    assert_eq!(
+        h.state().pending_editor_line(),
+        Some(line_of(&m.root_text, "github"))
+    );
+}
+
+/// follow-gui-4: the Editor tab then opens on that host's Host line.
+#[test]
+fn follow_gui_4_editor_tab_opens_on_the_selected_host() {
+    let m = Multi::new();
+    let mut h = harness(&m.root);
+    h.run();
+    click(&mut h, "ranch-nas");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num2);
+    h.run();
+    let s = h.state();
+    assert_eq!(s.tab, Tab::Editor);
+    assert_eq!(s.pending_editor_line(), None);
+    assert_eq!(s.editor_line(), Some(line_of(RANCH, "ranch-nas")));
+    assert_eq!(editor_value(&h), RANCH);
+}
+
+/// follow-gui-5: switching tabs without a new selection queues nothing, so
+/// a cursor the user placed stays.
+#[test]
+fn follow_gui_5_tab_round_trip_does_not_rejump() {
+    let m = Multi::new();
+    let mut h = harness(&m.root);
+    h.run();
+    click(&mut h, "ranch-nas");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num2);
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num1);
+    h.run();
+    assert_eq!(h.state().tab, Tab::Hosts);
+    assert_eq!(h.state().pending_editor_line(), None);
+    // Re-clicking the selected host is not a new selection either.
+    click(&mut h, "ranch-nas");
+    assert_eq!(h.state().pending_editor_line(), None);
+}
+
+/// follow-gui-6: Esc clears the selection and leaves the editor alone.
+#[test]
+fn follow_gui_6_escape_leaves_the_editor() {
+    let m = Multi::new();
+    let mut h = harness(&m.root);
+    h.run();
+    click(&mut h, "dcevant");
+    let pending = h.state().pending_editor_line();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(h.state().selected(), None);
+    assert_eq!(h.state().current_file(), index_of(&h, "ranch"));
+    assert_eq!(h.state().pending_editor_line(), pending);
+}
+
+/// follow-gui-7: on a single file the editor follows to each Host line.
+#[test]
+fn follow_gui_7_single_file_follows_the_host_line() {
+    let f = Fixture::new(THREE_HOSTS);
+    let mut h = harness(&f.path);
+    h.run();
+    click(&mut h, "web-prod");
+    assert_eq!(
+        h.state().pending_editor_line(),
+        Some(line_of(THREE_HOSTS, "web-prod"))
+    );
+}
+
+/// follow-gui-8: Show in Editor still opens the Editor tab at the host.
+#[test]
+fn follow_gui_8_show_in_editor_still_switches_tab() {
+    let m = Multi::new();
+    let mut h = harness(&m.root);
+    h.run();
+    click(&mut h, "dcevant");
+    click(&mut h, "Show in Editor");
+    assert_eq!(h.state().tab, Tab::Editor);
+    assert_eq!(h.state().editor_line(), Some(line_of(RANCH, "dcevant")));
+}
+
+/// Up and Down move the host selection, and the editor follows.
+#[test]
+fn follow_gui_arrow_keys_move_the_selection() {
+    let m = Multi::new();
+    let mut h = harness(&m.root);
+    h.run();
+    let names = h.state().visible_names();
+    h.key_press(egui::Key::ArrowDown);
+    h.run();
+    assert_eq!(h.state().selected(), Some(names[0].as_str()));
+    h.key_press(egui::Key::ArrowDown);
+    h.run();
+    let second = names[1].clone();
+    assert_eq!(h.state().selected(), Some(second.as_str()));
+    let ws = h.state().workspace();
+    let wl = ws.find_host(&second).unwrap();
+    assert_eq!(h.state().current_file(), wl.file);
+    assert_eq!(h.state().pending_editor_line(), Some(ws.host_line(wl)));
+    h.key_press(egui::Key::ArrowUp);
+    h.run();
+    assert_eq!(h.state().selected(), Some(names[0].as_str()));
+}

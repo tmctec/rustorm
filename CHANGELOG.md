@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here. Format follows [Keep a Changelog](https://keepachangelog.com).
 
+## [eagleray] - 2026-09-28
+
+### Added
+- rustorm-tui: the editor follows the browsing panes. A new file-list highlight shows that file; a new selected host (movement, sort, filter, or a write) shows its file with the cursor on its `Host` line, read from the buffer so unsaved edits are honored. Focus never moves, an unchanged selection never moves the cursor, and returning to the table after browsing files re-syncs to the selected host.
+- rustorm-tui: `Enter` on a host opens `Settings <host>`: every settable keyword in six groups (Connection, Authentication, Forwarding, Proxy, Multiplexing, Advanced), yes/no and fixed choices cycled with Space/Left/Right including unset, other values typed, `Ctrl-U` clear, `PgUp`/`PgDn` group jump, repeatable keys one row per value, `Host *` values shown as inherited; one write with one backup, `No changes.` when nothing changed.
+- rustorm-gui: selecting a host (click, or Up/Down with no text field focused) points the editor at its file and queues the cursor on its `Host` line for the Editor tab, without leaving the Hosts tab.
+- rustorm-gui: All settings section in the detail panel with collapsible groups, drop-downs (not set / values) for flags and closed choices, text fields with a ▾ word menu for open choices, inline value problems, add/remove rows for repeatable keys, Save settings (one write) and Reset; disabled under the editor guard.
+- rustorm-core: `keyspec` module — `KeySpec`/`KeyType`/`KeyGroup` for every settable keyword, `validate_setting`, `SettingChange`, `SettingsDraft`/`SettingRow` (the form model both UIs share); `Config::apply_settings` and `Workspace::apply_settings` apply a batch of sets and unsets to one host in one write; new `Error::InvalidSetting`.
+- Makefile: `all` alias for `build`; `test-gui-walkthrough` records the GUI follow and All settings flows.
+- docs: Settings flow and editor-follow behavior in tui.md, gui.md and the user guide; F-57 and F-58 in features.md.
+
+### Changed
+- rustorm-tui: `e` alone opens the quick edit form; `Enter` on a host opens Settings. The table help bar reads `/ f:filter … e:edit  Enter:settings …` to fit 150 columns.
+- rustorm-gui: `App::editor_line` reports every cursor placement (Show in Editor or a followed host); `App::pending_editor_line` exposes the queued one.
+- Test registry: 48 new catalog cases (R-editor-follows, R-typed-host-form), 47 new tests, every earlier case revalidated green.
+
 ## [dhole] - 2026-09-28
 
 ### Added

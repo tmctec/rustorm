@@ -1,6 +1,6 @@
 # rustorm-tui — terminal UI
 
-`rustorm-tui` is a full-screen terminal view over the same config file `rustorm` edits. It lists, adds, edits, clones, moves and deletes hosts, creates and renames sections, and embeds a raw editor for the file with ssh_config highlighting. Every change goes through `rustorm-core`, so the file changes exactly as the matching `rustorm` command would change it, backup included (D2).
+`rustorm-tui` is a full-screen terminal view over the same config file `rustorm` edits. It lists, adds, edits, clones, moves and deletes hosts, edits every keyword a host sets in a settings form, creates and renames sections, and embeds a raw editor for the file with ssh_config highlighting. Every change goes through `rustorm-core`, so the file changes exactly as the matching `rustorm` command would change it, backup included (D2).
 
 ```
 rustorm-tui [-c, --config <FILE>] [--no-backup]
@@ -29,14 +29,14 @@ An unknown option exits 2. Without a terminal on stdin and stdout it prints `err
 │    ServerAliveInterval 60                                                                          │
 └────────────────────────────────────────────────────────────────────────────────────────────────────┘
  vps -> root@vps.example.com:2222
- ?:help  q:quit  Tab:focus  1-7:sort  /:filter  f:column filter  a:add  e:edit  d:delete  c:clone  m:move
+ ?:help  q:quit  Tab:focus  1-7:sort  / f:filter  x:clear  a:add  e:edit  Enter:settings  d:delete  c:clone  m:move  n:new section  o:editor
 ```
 
 | Region | Content |
 |---|---|
 | Section list | `All` then every section in file order with its host count; the last one is the catch-all. `Enter` on a section sets the section filter to it; `Enter` on `All` clears it. Absent on a file without sections. |
 | Host table | A ratatui `Table`, one row per host, `Host *` excluded. Columns: **section**, **host** (primary name), **user** (the host's own `User`), **hostname** (`HostName`), **port** (the host's own `Port`), **proxy** (`ProxyCommand`), **jump** (`ProxyJump`). A missing value shows `·`. The title reads `Hosts <shown>/<total>`. A file without hosts shows `no hosts in <path>. Press a to add one.` |
-| Editor pane | The whole file in a `tui-textarea`, highlighted by the core lexer. The title shows the path, `[modified]` when the buffer differs from the file, and the cursor line and column. |
+| Editor pane | The whole file in a `tui-textarea`, highlighted by the core lexer. It follows the selected host, cursor on its `Host` line (see Editor). The title shows the path, `[modified]` when the buffer differs from the file, and the cursor line and column. |
 | Status line | The selected host's resolved `name -> user@hostname:port`, the active filters (`filter: section~bob user~deploy`), and the last message. An error starts with `Error:`, a success with `✔`. |
 | Help bar | The keys valid in the focused pane. `?` opens the full key overlay. |
 
@@ -51,9 +51,10 @@ The focused pane has a double border and a bracketed title; the selected row is 
 | `?` | table, sections | Toggle the key overlay. `Esc` or `?` closes it. |
 | `Tab` / `Shift-Tab` | table, sections, editor | Cycle focus: files (on a workspace of several files), sections, table, editor. |
 | `F` | table, sections | Focus the file list; only on a workspace of several files (see Files). |
+| `↑` `↓` / `j` `k`, `g` `G` / `Home` `End` | files | Move the highlight; the editor shows the highlighted file. |
 | `Enter` | files | Show that file in the editor and focus it. |
 | `Esc` | files | Return focus to the table. |
-| `↑` `↓` / `j` `k` | table, sections | Move the selection. |
+| `↑` `↓` / `j` `k` | table, sections | Move the selection; the editor follows the selected host. |
 | `g` `G` / `Home` `End` | table, sections | First or last row. |
 | `1` … `7` | table | Sort by section, host, user, hostname, port, proxy, jump. The same key again flips the direction. |
 | `0` | table | Restore file order. |
@@ -62,7 +63,8 @@ The focused pane has a double border and a bracketed title; the selected row is 
 | `x` | table | Clear every filter. |
 | `Enter` | sections | Filter the table to that section (`All` clears it). |
 | `a` | table | Add a host. |
-| `e` / `Enter` | table | Edit the selected host. |
+| `e` | table | Edit the selected host's connection URI, identity file and section. |
+| `Enter` | table | Open the settings form: every keyword of the selected host (see Flows, Settings). |
 | `d` | table | Delete the selected host, after confirmation. |
 | `c` | table | Clone the selected host. |
 | `m` | table | Move or rename the selected host. |
@@ -75,9 +77,13 @@ The focused pane has a double border and a bracketed title; the selected row is 
 | `Tab` / `Shift-Tab` / `↑` `↓` | form | Next or previous field. |
 | `Enter` | form, filter input | Submit. |
 | `Esc` | form, filter input, prompt | Cancel; nothing changes. |
+| `↑` `↓` / `Tab` `Shift-Tab`, `PgUp` `PgDn`, `Home` `End` | settings form | Previous or next row, previous or next group, first or last row. |
+| `Space` / `←` `→` | settings form | Step a yes/no or fixed-choice keyword through not set and its values; `Space` types a space into free text. |
+| `Ctrl-U` | settings form | Clear the value, so the key is removed on save. |
+| `Enter` | settings form | Save every change in one write. |
 | `y` / `n` | yes/no prompt | Answer; every key but `y` means no. |
 
-`q`, digits and letters type text while a form, a filter input or the editor has focus.
+`q`, digits and letters type text while a form, the settings form, a filter input or the editor has focus.
 
 ## Sorting and filtering
 
@@ -105,6 +111,15 @@ Every flow applies one core operation, writes through the core with a backup (un
 1. `e` on `vps` opens `Edit host vps` with `Connection URI`, `Identity file`, `Section`, prefilled from the host's own `User`, `HostName`, `Port`, first `IdentityFile` and section.
 2. `Enter` submits. The URI replaces `HostName`, `User` and `Port`. A changed identity replaces every `IdentityFile`; an emptied identity removes them; an unchanged one leaves them. A changed section moves the host.
 3. On success: `✔ vps updated.`
+
+**Settings** (`Config::apply_settings`)
+
+1. `Enter` on `vps` opens `Settings vps`: every keyword a host can set, in six groups — Connection, Authentication, Forwarding, Proxy, Multiplexing, Advanced — each row prefilled with the host's own value. A key the host leaves unset shows `·`, or `(60 from Host *)` when `Host *` gives it a value. A repeatable key (`IdentityFile`, `LocalForward`, `RemoteForward`, `DynamicForward`, `CertificateFile`, `SendEnv`, `SetEnv`) has one row per value plus an empty row for another.
+2. Yes/no keys such as `Compression` and fixed choices such as `ControlMaster` (`no`, `yes`, `ask`, `auto`, `autoask`) change with `Space`, `←` and `→`, which step through not set and each value. Every other key is typed. `Ctrl-U` clears a row. A changed row shows `*`.
+3. `Enter` checks every changed value against its keyword and writes them all at once, with one backup. A value that does not fit keeps the form open with `Error: Port must be a port from 1 to 65535.` and the file untouched. A cleared key is removed from the host; a typed value for a key `Host *` sets gives the host its own line and leaves `Host *` alone. Comments and untouched lines keep their place.
+4. On success: `✔ vps updated.` With nothing changed: `No changes.` and nothing is written. `Esc` cancels: `Cancelled.`
+
+Keywords rustorm does not know stay in the file and do not show in the form; edit them in the editor.
 
 **Delete** (`Config::delete`)
 
@@ -142,6 +157,8 @@ Every flow applies one core operation, writes through the core with a backup (un
 
 The editor is a `tui-textarea` holding the file's text. It never soft-wraps; long lines, such as the 103-column banners, scroll horizontally with the cursor.
 
+**Follows the selection.** Moving the table selection to another host shows that host in the editor, cursor on its `Host` line, while focus stays on the table. The line comes from the buffer, so unsaved edits that moved it are honored. The same happens after a sort, a filter or a write selects a different host. Moving the file-list highlight shows the highlighted file; returning to the table then puts the editor back on the selected host. The editor stays put while the selection does not change, so tabbing to the editor, moving the cursor and tabbing back keeps it where it was. An empty table leaves the editor alone.
+
 **Highlighting.** Each visible line is styled by the spans of `rustorm_core::Lexer::next_line`, which carries banner state from the top of the file. One style per `SpanKind`:
 
 | SpanKind | Color | Modifier (kept without color) |
@@ -168,10 +185,10 @@ The editor is a `tui-textarea` holding the file's text. It never soft-wraps; lon
 
 On a workspace of several files (see `cli.md`, Included files) the TUI shows every file and edits them one at a time. On a workspace of one file none of this appears and the screen is as described above.
 
-- **File list.** A pane left of the section list: the root first, then every included file in load order, each with its host count. `•` before a path marks a file whose buffer has unsaved edits; an unreadable file shows `cannot read` and cannot be opened. `F` focuses the pane, and it joins the `Tab` cycle before the section list. `Enter` on a file shows it in the editor and focuses the editor. Paths longer than the pane lose their start to `…`.
+- **File list.** A pane left of the section list: the root first, then every included file in load order, each with its host count. `•` before a path marks a file whose buffer has unsaved edits; an unreadable file shows `cannot read` and cannot be opened. `F` focuses the pane, and it joins the `Tab` cycle before the section list. Moving the highlight shows the highlighted file in the editor, focus staying on the list; an unreadable file leaves the editor where it was. `Enter` on a file shows it in the editor and focuses the editor. Paths longer than the pane lose their start to `…`.
 - **Host table.** A **file** column comes first, showing the file name of the file that holds the host. It sorts with `1` and filters with `f` then `1`; the other columns shift one digit right, so `1` … `8` sort. A host's own section is the section inside its file.
 - **Sections.** The section list shows every file's sections; a section name held by two files shows once per file, followed by the file name. `Enter` on a section filters the table to that section and its file; `Enter` on `All` clears both filters. `R` renames the section in its own file.
-- **Editor.** The editor holds one buffer per file, each with its own cursor and undo. Its title shows the path of the file on screen. `o` on a host shows the file that holds it, at its `Host` line.
+- **Editor.** The editor holds one buffer per file, each with its own cursor and undo. Its title shows the path of the file on screen. Selecting a host shows the file that holds it, at its `Host` line; `o` does the same and focuses the editor.
 - **Save.** `Ctrl-S` saves only the file on screen, after its own backup (`<file>~`, or `<dir>/.<name>~` when an `Include` pattern would match `<file>~`; see `cli.md`, Included files), and reports `✔ Saved ~/.ssh/config.d/cypress.` The other buffers keep their edits.
-- **Forms.** Add, edit, clone, move and delete write to the file the CLI would pick (see `cli.md`, Included files): a host edit to the file holding the host, a section to the file holding it, a new host without a section to the root. The status message names the file, as the CLI does. A section name held by two files refuses the form with `Error: section lab exists in ~/.ssh/config.d/cypress and ~/.ssh/config.d/gke. Edit the file you mean in the editor (F).` The forms refuse to run while any buffer has unsaved edits.
+- **Forms.** Add, edit, settings, clone, move and delete write to the file the CLI would pick (see `cli.md`, Included files): a host edit to the file holding the host, a section to the file holding it, a new host without a section to the root. The status message names the file, as the CLI does. A section name held by two files refuses the form with `Error: section lab exists in ~/.ssh/config.d/cypress and ~/.ssh/config.d/gke. Edit the file you mean in the editor (F).` The forms refuse to run while any buffer has unsaved edits.
 - **Quit.** `q` or `Ctrl-C` with unsaved edits in several files asks once, listing them: `Unsaved changes in ~/.ssh/config.d/cypress, ~/.ssh/config.d/ranch. [s]ave all / [d]iscard all / [c]ancel`. `s` saves every listed file and quits, unless a save is refused, which leaves the TUI open on that file. With one dirty file the prompt is the single-file one.
