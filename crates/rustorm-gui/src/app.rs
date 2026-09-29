@@ -1535,45 +1535,52 @@ impl App {
         let goto = self.goto_line.take();
         let current = self.current;
         let salt = self.ws.files[current].path.clone();
-        let row_height = ui.fonts_mut(|f| f.row_height(&FontId::monospace(13.0)));
         let buffer = &mut self.buffers[current];
-        let mut changed = false;
-        egui::ScrollArea::both()
+        let margin = egui::Margin::symmetric(4, 2);
+        // Row tops within the text, laid out as the editor lays it out.
+        let row_tops: Vec<f32> = layouter(ui, &*buffer, f32::INFINITY)
+            .rows
+            .iter()
+            .map(|r| r.rect().top())
+            .collect();
+        let mut scroll = egui::ScrollArea::both()
             .id_salt(("editor-scroll", &salt))
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                let resp = ui.add(
-                    TextEdit::multiline(buffer)
-                        .id_salt(("editor", &salt))
-                        .code_editor()
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(30)
-                        .layouter(&mut layouter),
-                );
-                set_label(ui, resp.id, "config editor");
-                changed = resp.changed();
-                if let Some(line) = goto {
-                    let char_index: usize = buffer
-                        .split_inclusive('\n')
-                        .take(line.saturating_sub(1))
-                        .map(|l| l.chars().count())
-                        .sum();
-                    let mut state = TextEdit::load_state(ui.ctx(), resp.id).unwrap_or_default();
-                    state
-                        .cursor
-                        .set_char_range(Some(egui::text::CCursorRange::one(
-                            egui::text::CCursor::new(char_index),
-                        )));
-                    TextEdit::store_state(ui.ctx(), resp.id, state);
-                    resp.request_focus();
-                    let top = resp.rect.top() + row_height * line.saturating_sub(1) as f32;
-                    let target = egui::Rect::from_min_size(
-                        egui::pos2(resp.rect.left(), top),
-                        egui::vec2(1.0, row_height),
-                    );
-                    ui.scroll_to_rect(target, Some(egui::Align::TOP));
-                }
-            });
+            .auto_shrink(false);
+        if let Some(&top) = goto.and_then(|line| row_tops.get(line.saturating_sub(1))) {
+            scroll = scroll.vertical_scroll_offset(f32::from(margin.top) + top);
+        }
+        let mut changed = false;
+        scroll.show(ui, |ui| {
+            let resp = ui.add(
+                TextEdit::multiline(buffer)
+                    .id_salt(("editor", &salt))
+                    .code_editor()
+                    .margin(margin)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(30)
+                    .layouter(&mut layouter),
+            );
+            set_label(ui, resp.id, "config editor");
+            changed = resp.changed();
+            // Room below the text for the last row to scroll to the top.
+            let last = f32::from(margin.top) + row_tops.last().copied().unwrap_or(0.0);
+            ui.add_space((last + ui.clip_rect().height() - resp.rect.height()).max(0.0));
+            if let Some(line) = goto {
+                let char_index: usize = buffer
+                    .split_inclusive('\n')
+                    .take(line.saturating_sub(1))
+                    .map(|l| l.chars().count())
+                    .sum();
+                let mut state = TextEdit::load_state(ui.ctx(), resp.id).unwrap_or_default();
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(
+                        egui::text::CCursor::new(char_index),
+                    )));
+                TextEdit::store_state(ui.ctx(), resp.id, state);
+                resp.request_focus();
+            }
+        });
         if changed {
             self.editor_error = None;
         }
