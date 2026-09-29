@@ -328,6 +328,101 @@ fn gui_walkthrough_evidence() {
         .filter(|n| n.ends_with('~'))
         .collect();
     writeln!(out, "backups: {backups:?}").unwrap();
+
+    // Filled view and Add setting on a cypressMelissa-shaped host.
+    let melissa = "Host cypressMelissa\n    HostName 192.168.144.130\n    User home\n    Port 22\n    IdentityFile ~/.ssh/to_cypressMelissa\n    IdentitiesOnly yes\n";
+    std::fs::write(d.join("cypress"), melissa).unwrap();
+    let mut h = harness(&root);
+    h.run();
+    click(&mut h, "cypressMelissa");
+    click(&mut h, "All settings");
+    let keys = |h: &Harness<'static, App>| {
+        let s = h.state();
+        let rows = &s.settings().unwrap().rows;
+        s.settings_shown_rows()
+            .into_iter()
+            .map(|i| rows[i].spec.key)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    writeln!(out, "\n--- filled view, cypressMelissa: {}", keys(&h)).unwrap();
+    click(&mut h, "All");
+    writeln!(
+        out,
+        "All: {} rows shown",
+        h.state().settings_shown_rows().len()
+    )
+    .unwrap();
+    click(&mut h, "Filled");
+    writeln!(out, "Filled again: {}", keys(&h)).unwrap();
+    type_into(&mut h, "Add setting", "hostk");
+    writeln!(
+        out,
+        "typed hostk, suggestion shown: {}",
+        h.query_all_by_label("→ HostKeyAlias").next().is_some()
+    )
+    .unwrap();
+    h.key_press(egui::Key::Tab);
+    h.run();
+    h.get_all_by_label("HostKeyAlias")
+        .last()
+        .unwrap()
+        .type_text("alias1");
+    h.run();
+    click(&mut h, "Save settings");
+    writeln!(
+        out,
+        "Add setting + Save: status {:?}\n--- config.d/cypress after\n{}",
+        h.state().status(),
+        std::fs::read_to_string(d.join("cypress")).unwrap()
+    )
+    .unwrap();
+
+    // Editor completion on the same file.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num2);
+    h.run();
+    click(&mut h, "config editor");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run();
+    h.key_press(egui::Key::Backspace);
+    h.run();
+    let text = |h: &mut Harness<'static, App>, t: &str| {
+        h.event(egui::Event::Text(t.into()));
+        h.run();
+    };
+    text(&mut h, "Host cypressMelissa\n    por");
+    writeln!(
+        out,
+        "\n--- editor: typed `    por`, ghost {:?}",
+        h.state().editor_suggestion()
+    )
+    .unwrap();
+    text(&mut h, " ");
+    writeln!(
+        out,
+        "Space -> {:?}, selection {:?}",
+        h.state().editor_text().lines().last().unwrap(),
+        h.state().editor_selection()
+    )
+    .unwrap();
+    text(&mut h, "2222\n    compr");
+    text(&mut h, " ");
+    writeln!(
+        out,
+        "`    compr` Space -> {:?}",
+        h.state().editor_text().lines().last().unwrap()
+    )
+    .unwrap();
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Space);
+    h.run();
+    writeln!(
+        out,
+        "Ctrl+Space -> {:?}",
+        h.state().editor_text().lines().last().unwrap()
+    )
+    .unwrap();
+    writeln!(out, "--- editor buffer\n{}", h.state().editor_text()).unwrap();
+
     std::fs::write(out_path, out).unwrap();
     assert!(after.contains("ControlMaster auto"));
 }
