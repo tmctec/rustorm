@@ -92,7 +92,7 @@ rustorm dump --file cypress                             # print one included fil
 
 | Key | Action |
 |---|---|
-| `↑` `↓` or `j` `k` | Move the selection; the editor below follows, showing the selected host |
+| `↑` `↓` or `j` `k` | Move the selection; the editor below follows, with the selected host's `Host` line at its top |
 | `Tab` / `Shift-Tab` | Cycle focus between sections, table and editor |
 | `1` … `7` | Sort by section, host, user, hostname, port, proxy, jump; press again to reverse; `0` restores file order |
 | `/` | Filter every column; `f` then a column number filters one column; `x` clears filters |
@@ -107,7 +107,7 @@ rustorm dump --file cypress                             # print one included fil
 | `Esc` | Cancel a form or prompt, or leave the editor |
 | `q` | Quit; asks first if the editor has unsaved edits, listing every unsaved file |
 
-**Settings form.** `Enter` on a host lists every ssh_config keyword in six groups: Connection, Authentication, Forwarding, Proxy, Multiplexing and Advanced. Yes/no and fixed-choice keys such as `Compression` or `ControlMaster` change with `Space` or the arrow keys, including back to not set. Other keys are typed. `Ctrl-U` clears one. Values your `Host *` block supplies show dimmed. `Enter` checks each value (a port must be a number, `StrictHostKeyChecking` one of its documented words) and saves every change at once with a backup; `Esc` cancels.
+**Settings form.** `Enter` on a host shows the keywords it sets, in six groups: Connection, Authentication, Forwarding, Proxy, Multiplexing and Advanced. `Ctrl-T` shows every keyword. To add one, go to the `Add setting` row at the bottom and start typing its name — `hostk` offers `HostKeyAlias` — then `Tab` to its value. Yes/no and fixed-choice keys such as `Compression` or `ControlMaster` change with `Space` or the arrow keys, including back to not set. Other keys are typed. `Ctrl-U` clears one. Values your `Host *` block supplies show dimmed. `Enter` checks each value (a port must be a number, `StrictHostKeyChecking` one of its documented words) and saves every change at once with a backup; `Esc` cancels.
 
 Every table column sorts and filters, including proxy (`ProxyCommand`) and jump (`ProxyJump`). Hosts without the sorted key sort last. Filters combine: a section filter and a user filter together show only hosts matching both. With included files the table gains a file column and the editor keeps one buffer per file; `Ctrl-S` saves only the file shown. Full key list: `docs/tui.md`.
 
@@ -117,13 +117,15 @@ Every table column sorts and filters, including proxy (`ProxyCommand`) and jump 
 
 - Click a column header to sort; click again to reverse. The filter box above each column narrows the rows, and filters combine.
 - Select a row, or move with `↑` `↓`, to edit it in the detail panel: name, connection URI, identity file and section. Clearing the identity file removes it from the host. Save writes the file; Delete asks first. The Editor tab follows the selection, opening on the selected host's `Host` line.
-- **All settings** in the detail panel lists every keyword the host can set, grouped the same way as the terminal UI. Yes/no and fixed-choice keys are drop-downs, other keys are text fields, repeatable keys like `LocalForward` get a field per value, and a bad value is flagged under its field. **Save settings** writes every change at once.
+- **All settings** in the detail panel shows the keywords the host sets, grouped the same way as the terminal UI; switch to **All** for every keyword, or type a name into **Add setting** and press Tab. Yes/no and fixed-choice keys are drop-downs, other keys are text fields, repeatable keys like `LocalForward` get a field per value, and a bad value is flagged under its field. **Save settings** writes every change at once.
 - Add opens the same form empty. Clone and Move to section act on the selected host.
-- New section… under the sidebar creates an empty section; on a file without sections it also creates the catch-all.
+- New section… under the sidebar creates an empty section; on a file without sections it also creates the catch-all. With a section selected, Rename section… renames it, or merges it into a section that already has the new name.
 - With included files the sidebar lists every file with its host count, the table gains a file column, and the editor has a file selector; Save writes only the selected file. Show in Editor on a host opens its file at its `Host` line. Quitting with several unsaved files lists them in one dialog with Save All.
 - Shortcuts: `Cmd-S` (or `Ctrl-S`) save, `Cmd-N` add, `Cmd-F` focus the filter, `Cmd-E` open the editor, `Cmd-1` / `Cmd-2` switch tabs, `Delete` remove the selected host, `Esc` cancel.
 
 ## The embedded editor
+
+While you type a keyword at the start of a line the editor suggests the rest in dim text; Space accepts it and fills in the usual value, selected so you can type over it (`por` Space gives `Port 22`). Ctrl-Space on a `yes`/`no` or fixed-choice value swaps it.
 
 Both UIs include an editor for the raw config file with syntax highlighting: comments, section banners, `Host` lines, keys, values, and `ProxyCommand` and `ProxyJump` in their own colors. Saving writes through the same engine as the CLI, so a backup is made, untouched lines stay byte for byte, and sections are re-sorted. An edit that would break the file, such as a `Host` line with no name, is refused with its line number. If the file changed on disk while you were editing, the UI reloads it before applying your change; if the same host changed on both sides it asks which version to keep. Quitting with unsaved edits asks whether to save or discard. With included files the editor holds one buffer per file and saves them one at a time, each with its own backup.
 

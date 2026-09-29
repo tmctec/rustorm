@@ -72,6 +72,8 @@ The focused pane has a double border and a bracketed title; the selected row is 
 | `n` | table, sections | Create an empty section. |
 | `o` | table | Open the editor at the selected host's `Host` line, in the file that holds it. |
 | `Ctrl-S` | editor | Save the buffer of the file on screen. |
+| `Space` | editor | With a keyword suggestion showing, accept it (see Editor, Completion); anywhere else, a space. |
+| `Ctrl-Space` | editor | Swap a yes/no or fixed-choice value under the cursor. |
 | `Ctrl-R` | editor | Discard the buffer's edits and reload the file, after confirmation. |
 | `Esc` | editor | Return focus to the table; the buffer keeps its edits. |
 | `Tab` / `Shift-Tab` / `↑` `↓` | form | Next or previous field. |
@@ -81,6 +83,8 @@ The focused pane has a double border and a bracketed title; the selected row is 
 | `Space` / `←` `→` | settings form | Step a yes/no or fixed-choice keyword through not set and its values; `Space` types a space into free text. |
 | `Ctrl-U` | settings form | Clear the value, so the key is removed on save. |
 | `Enter` | settings form | Save every change in one write. |
+| `Ctrl-T` | settings form | Switch between the filled view and every keyword. |
+| `Tab` | settings form, Add setting | Add the suggested keyword and move to its value. |
 | `y` / `n` | yes/no prompt | Answer; every key but `y` means no. |
 
 `q`, digits and letters type text while a form, the settings form, a filter input or the editor has focus.
@@ -114,8 +118,10 @@ Every flow applies one core operation, writes through the core with a backup (un
 
 **Settings** (`Config::apply_settings`)
 
-1. `Enter` on `vps` opens `Settings vps`: every keyword a host can set, in six groups — Connection, Authentication, Forwarding, Proxy, Multiplexing, Advanced — each row prefilled with the host's own value. A key the host leaves unset shows `·`, or `(60 from Host *)` when `Host *` gives it a value. A repeatable key (`IdentityFile`, `LocalForward`, `RemoteForward`, `DynamicForward`, `CertificateFile`, `SendEnv`, `SetEnv`) has one row per value plus an empty row for another.
-2. Yes/no keys such as `Compression` and fixed choices such as `ControlMaster` (`no`, `yes`, `ask`, `auto`, `autoask`) change with `Space`, `←` and `→`, which step through not set and each value. Every other key is typed. `Ctrl-U` clears a row. A changed row shows `*`.
+1. `Enter` on `vps` opens `Settings vps (filled)`: the keywords the host sets, under their groups — Connection, Authentication, Forwarding, Proxy, Multiplexing, Advanced — with groups the host does not use hidden, and an `Add setting` row at the bottom. `Ctrl-T` switches to `Settings vps (all)`, every keyword a host can set, and back; edits carry across. The form opens filled every time. In the all view a key the host leaves unset shows `·`, or `(60 from Host *)` when `Host *` gives it a value. A repeatable key (`IdentityFile`, `LocalForward`, `RemoteForward`, `DynamicForward`, `CertificateFile`, `SendEnv`, `SetEnv`) has one row per value plus an empty row for another.
+2. Yes/no keys such as `Compression` and fixed choices such as `ControlMaster` (`no`, `yes`, `ask`, `auto`, `autoask`) change with `Space`, `←` and `→`, which step through not set and each value. Every other key is typed. `Ctrl-U` clears a row; a cleared row stays in the filled view, marked `*`, until the form is saved or closed. A changed row shows `*`.
+
+   **Add setting.** `End` (or moving past the last row) focuses `Add setting`. Typing shows the first keyword that starts with the text, completed in dim text, and lists the other matches; with no keyword starting with it, keywords containing it are offered. `Tab` adds that keyword and moves to its value, prefilled with its usual value when it has one (`Port` 22, yes/no keys `yes`, a fixed choice its first value) and selected, so typing replaces it. Adding a single-value keyword the host already sets moves to its row; adding a repeatable one gives another empty row. Text matching no keyword reads `no matching keyword`. `Esc` clears the typed text; `Esc` on an empty row cancels the form.
 3. `Enter` checks every changed value against its keyword and writes them all at once, with one backup. A value that does not fit keeps the form open with `Error: Port must be a port from 1 to 65535.` and the file untouched. A cleared key is removed from the host; a typed value for a key `Host *` sets gives the host its own line and leaves `Host *` alone. Comments and untouched lines keep their place.
 4. On success: `✔ vps updated.` With nothing changed: `No changes.` and nothing is written. `Esc` cancels: `Cancelled.`
 
@@ -157,7 +163,11 @@ Keywords rustorm does not know stay in the file and do not show in the form; edi
 
 The editor is a `tui-textarea` holding the file's text. It never soft-wraps; long lines, such as the 103-column banners, scroll horizontally with the cursor.
 
-**Follows the selection.** Moving the table selection to another host shows that host in the editor, cursor on its `Host` line, while focus stays on the table. The line comes from the buffer, so unsaved edits that moved it are honored. The same happens after a sort, a filter or a write selects a different host. Moving the file-list highlight shows the highlighted file; returning to the table then puts the editor back on the selected host. The editor stays put while the selection does not change, so tabbing to the editor, moving the cursor and tabbing back keeps it where it was. An empty table leaves the editor alone.
+**Follows the selection.** Moving the table selection to another host shows that host in the editor, its `Host` line at the top of the pane with the cursor on it, while focus stays on the table. Near the end of the file the rest of the pane stays empty so the `Host` line can still sit at the top. The line comes from the buffer, so unsaved edits that moved it are honored. The same happens after a sort, a filter or a write selects a different host. Moving the file-list highlight shows the highlighted file; returning to the table then puts the editor back on the selected host. The editor stays put while the selection does not change, so tabbing to the editor, moving the cursor and tabbing back keeps it where it was. An empty table leaves the editor alone.
+
+**Completion.** Typing the first word of a line inside a `Host` block (or `Host`, `Match`, `Include` at column 0) shows the first matching keyword as dim text after the cursor, the same matches as Add setting. `Space` accepts it: the line gets the keyword in its canonical spelling, a space and the keyword's usual value, selected, so typing replaces it — `    por` then `Space` gives `    Port 22` with `22` selected. A fully typed keyword is written in canonical case the same way (`    port` `Space` gives `    Port 22`). Keywords with no usual value, such as `HostKeyAlias` or `ProxyCommand`, get only the space. In a value, a comment or a word no keyword matches, `Space` is a plain space. `Ctrl-Space` on a yes/no or fixed-choice value swaps it to the next one: `yes` and `no` swap, `ask` becomes `accept-new` on `StrictHostKeyChecking`.
+
+Usual values: `Port` 22, `ServerAliveInterval` 60, `ConnectTimeout` 10, `ControlPersist` 10m, `ControlPath` `~/.ssh/cm-%r@%h:%p`, `IdentityFile` `~/.ssh/id_ed25519`, `LocalForward` `8080 localhost:80`, yes/no keys `yes`, fixed choices their first documented value.
 
 **Highlighting.** Each visible line is styled by the spans of `rustorm_core::Lexer::next_line`, which carries banner state from the top of the file. One style per `SpanKind`:
 
