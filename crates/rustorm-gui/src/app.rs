@@ -8,8 +8,8 @@ use egui::{
 };
 use egui_extras::{Column as TableColumn, TableBuilder};
 use rustorm_core::{
-    premade_value, Config, Env, FileState, KeyGroup, SectionSummary, SettingsDraft, Workspace,
-    WorkspaceSection, WriteOptions,
+    complete_line, premade_value, swap_value, Config, Env, FileState, KeyGroup, SectionSummary,
+    SettingsDraft, Workspace, WorkspaceSection, WriteOptions,
 };
 
 use crate::highlight::highlight_job;
@@ -187,6 +187,12 @@ pub struct App {
     settings: Option<SettingsDraft>,
     /// The last refused All settings save.
     settings_error: Option<String>,
+    /// The editor TextEdit's id, from the last frame it showed.
+    editor_id: Option<egui::Id>,
+    /// The keyword completion the editor shows after its cursor.
+    editor_ghost: Option<String>,
+    /// The editor's selection as character offsets, from its last frame.
+    editor_selection: Option<(usize, usize)>,
     /// How All settings shows the draft: filled or all rows, and the Add
     /// setting field.
     settings_view: SettingsView,
@@ -231,6 +237,9 @@ impl App {
             settings: None,
             settings_error: None,
             settings_view: SettingsView::default(),
+            editor_id: None,
+            editor_ghost: None,
+            editor_selection: None,
             dialog: None,
             editor_error: None,
             status: String::new(),
@@ -301,6 +310,18 @@ impl App {
     /// selected host.
     pub fn editor_line(&self) -> Option<usize> {
         self.editor_line
+    }
+
+    /// The keyword completion the editor offers after its cursor, as shown
+    /// dimmed: the rest of the keyword, or ` → Keyword`.
+    pub fn editor_suggestion(&self) -> Option<&str> {
+        self.editor_ghost.as_deref()
+    }
+
+    /// The editor's selection (or cursor, when both ends match) as character
+    /// offsets into the buffer, from the last frame.
+    pub fn editor_selection(&self) -> Option<(usize, usize)> {
+        self.editor_selection
     }
 
     /// The 1-based line the editor's cursor goes to when the Editor tab
@@ -1601,18 +1622,48 @@ impl App {
             scroll = scroll.vertical_scroll_offset(f32::from(margin.top) + top);
         }
         let mut changed = false;
+        let editor_id = self.editor_id;
+        let mut ghost = None;
+        let mut selection = None;
+        let mut new_id = None;
         scroll.show(ui, |ui| {
-            let resp = ui.add(
-                TextEdit::multiline(buffer)
-                    .id_salt(("editor", &salt))
-                    .code_editor()
-                    .margin(margin)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(30)
-                    .layouter(&mut layouter),
-            );
+            if let Some(id) = editor_id.filter(|id| ui.memory(|m| m.has_focus(*id))) {
+                changed |= complete_in_editor(ui, id, buffer);
+            }
+            let out = TextEdit::multiline(buffer)
+                .id_salt(("editor", &salt))
+                .code_editor()
+                .margin(margin)
+                .desired_width(f32::INFINITY)
+                .desired_rows(30)
+                .layouter(&mut layouter)
+                .show(ui);
+            let resp = out.response.clone();
             set_label(ui, resp.id, "config editor");
-            changed = resp.changed();
+            new_id = Some(resp.id);
+            changed |= resp.changed();
+            if let Some(range) = out.cursor_range {
+                let (a, b) = (
+                    usize::from(range.primary.index),
+                    usize::from(range.secondary.index),
+                );
+                selection = Some((a.min(b), a.max(b)));
+                if a == b && resp.has_focus() {
+                    let (line, col) = line_at(buffer, a);
+                    if let Some(c) = complete_line(line, col) {
+                        let hint = c.ghost(line);
+                        let at = out.galley.pos_from_cursor(range.primary);
+                        ui.painter().text(
+                            out.galley_pos + at.right_top().to_vec2(),
+                            egui::Align2::LEFT_TOP,
+                            &hint,
+                            FontId::monospace(13.0),
+                            ui.visuals().weak_text_color(),
+                        );
+                        ghost = Some(hint);
+                    }
+                }
+            }
             // Room below the text for the last row to scroll to the top.
             let last = f32::from(margin.top) + row_tops.last().copied().unwrap_or(0.0);
             ui.add_space((last + ui.clip_rect().height() - resp.rect.height()).max(0.0));
@@ -1638,6 +1689,9 @@ impl App {
         if goto.is_some() {
             self.editor_line = goto;
         }
+        self.editor_id = new_id;
+        self.editor_ghost = ghost;
+        self.editor_selection = selection;
     }
 
     /// The popup above the editor that picks the file it shows: every file
@@ -2127,4 +2181,92 @@ fn add_setting(
     }
     view.add.clear();
     view.add_error = None;
+}
+
+/// The line holding character offset `at` of `text`, and `at`'s column in
+/// it (characters).
+fn line_at(text: &str, at: usize) -> (&str, usize) {
+    let mut start = 0;
+    let mut chars = 0;
+    for line in text.split_inclusive('\n') {
+        let n = line.chars().count();
+        if at < chars + n || !line.ends_with('\n') {
+            return (line.trim_end_matches('\n'), at - chars);
+        }
+        start += line.len();
+        chars += n;
+    }
+    (&text[start..], at - chars)
+}
+
+/// Replaces characters `range` of `text` with `with`.
+fn replace_chars(text: &mut String, range: std::ops::Range<usize>, with: &str) {
+    let byte = |c: usize| text.char_indices().nth(c).map_or(text.len(), |(b, _)| b);
+    let (a, b) = (byte(range.start), byte(range.end));
+    text.replace_range(a..b, with);
+}
+
+/// Keyword completion in the raw editor, before the TextEdit sees this
+/// frame's input: Space on a line whose first word has a completion
+/// accepts it (keyword, a space and the premade value, selected);
+/// Ctrl+Space swaps a yes/no or choice value under the cursor. True when
+/// the buffer changed.
+fn complete_in_editor(ui: &mut Ui, id: egui::Id, buffer: &mut String) -> bool {
+    let Some(mut state) = TextEdit::load_state(ui.ctx(), id) else {
+        return false;
+    };
+    let Some(range) = state.cursor.char_range() else {
+        return false;
+    };
+    let at = usize::from(range.primary.index);
+    let (line, col) = line_at(buffer, at);
+    let line_start = at - col;
+    let line = line.to_string();
+    let select = |state: &mut egui::widgets::text_edit::TextEditState, a: usize, b: usize| {
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(a),
+                egui::text::CCursor::new(b),
+            )));
+    };
+    if ui.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Space)) {
+        let Some((value, next)) = swap_value(&line, col) else {
+            return false;
+        };
+        let start = line_start + value.start;
+        replace_chars(buffer, start..line_start + value.end, next);
+        select(&mut state, start, start + next.chars().count());
+        TextEdit::store_state(ui.ctx(), id, state);
+        return true;
+    }
+    if range.primary.index != range.secondary.index {
+        return false;
+    }
+    let Some(completion) = complete_line(&line, col) else {
+        return false;
+    };
+    let space = ui.input_mut(|i| {
+        let pos = i
+            .events
+            .iter()
+            .position(|e| matches!(e, egui::Event::Text(t) if t == " "));
+        pos.map(|p| i.events.remove(p)).is_some()
+    });
+    if !space {
+        return false;
+    }
+    let accepted = completion.accept(&line);
+    let line_len = line.chars().count();
+    replace_chars(buffer, line_start..line_start + line_len, &accepted.line);
+    match accepted.select {
+        Some(r) => select(&mut state, line_start + r.start, line_start + r.end),
+        None => select(
+            &mut state,
+            line_start + accepted.cursor,
+            line_start + accepted.cursor,
+        ),
+    }
+    TextEdit::store_state(ui.ctx(), id, state);
+    true
 }
