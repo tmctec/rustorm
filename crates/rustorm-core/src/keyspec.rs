@@ -241,6 +241,263 @@ pub fn key_specs() -> Vec<KeySpec> {
     KNOWN_KEYS.iter().filter_map(|k| key_spec(k)).collect()
 }
 
+/// Algorithm lists: long, rarely set by hand, and sharing prefixes with
+/// everyday keywords, so completion offers them only when typed in full.
+const ALGORITHM_LISTS: &[&str] = &[
+    "CASignatureAlgorithms",
+    "Ciphers",
+    "HostKeyAlgorithms",
+    "HostbasedAcceptedAlgorithms",
+    "HostbasedAcceptedKeyTypes",
+    "KexAlgorithms",
+    "MACs",
+    "PubkeyAcceptedAlgorithms",
+    "PubkeyAcceptedKeyTypes",
+];
+
+/// The keywords of `candidates` that match `typed` (ignoring case and
+/// surrounding space), in `candidates` order: those starting with it, or
+/// when none does, those containing it. Empty text matches nothing.
+fn complete_from(candidates: &[&'static str], typed: &str) -> Vec<&'static str> {
+    let t = typed.trim().to_ascii_lowercase();
+    if t.is_empty() {
+        return Vec::new();
+    }
+    let offered: Vec<&'static str> = candidates
+        .iter()
+        .filter(|k| !ALGORITHM_LISTS.contains(k) || k.eq_ignore_ascii_case(&t))
+        .copied()
+        .collect();
+    let prefix: Vec<&'static str> = offered
+        .iter()
+        .filter(|k| k.to_ascii_lowercase().starts_with(&t))
+        .copied()
+        .collect();
+    if !prefix.is_empty() {
+        return prefix;
+    }
+    offered
+        .into_iter()
+        .filter(|k| k.to_ascii_lowercase().contains(&t))
+        .collect()
+}
+
+/// The keywords a host can set that match `typed`, best first: those
+/// starting with it (ignoring case) in [`KNOWN_KEYS`] order, or when none
+/// does, those containing it. Algorithm-list keywords (`Ciphers`,
+/// `HostKeyAlgorithms` and the like) are offered only when typed in full.
+///
+/// ```
+/// use rustorm_core::complete_setting;
+/// assert_eq!(complete_setting("hostk"), ["HostKeyAlias"]);
+/// assert_eq!(complete_setting("forward")[0], "ForwardAgent");
+/// assert_eq!(complete_setting("keyal"), ["HostKeyAlias"]);
+/// assert!(complete_setting("zzz").is_empty());
+/// ```
+pub fn complete_setting(typed: &str) -> Vec<&'static str> {
+    let keys: Vec<&'static str> = key_specs().iter().map(|s| s.key).collect();
+    complete_from(&keys, typed)
+}
+
+/// The value a keyword is usually set to, which completing or adding the
+/// keyword fills in ready to overwrite: `yes` for a flag, the first
+/// documented value of a choice, and a common value for a few others.
+/// `None` for free text such as `HostKeyAlias` or `ProxyCommand`.
+///
+/// ```
+/// use rustorm_core::premade_value;
+/// assert_eq!(premade_value("port"), Some("22"));
+/// assert_eq!(premade_value("StrictHostKeyChecking"), Some("yes"));
+/// assert_eq!(premade_value("HostKeyAlias"), None);
+/// ```
+pub fn premade_value(key: &str) -> Option<&'static str> {
+    let spec = key_spec(key)?;
+    match spec.key {
+        "Port" => return Some("22"),
+        "ServerAliveInterval" => return Some("60"),
+        "ConnectTimeout" => return Some("10"),
+        "ControlPersist" => return Some("10m"),
+        "ControlPath" => return Some("~/.ssh/cm-%r@%h:%p"),
+        "IdentityFile" => return Some("~/.ssh/id_ed25519"),
+        "LocalForward" => return Some("8080 localhost:80"),
+        _ => {}
+    }
+    match spec.kind {
+        KeyType::Flag => Some("yes"),
+        KeyType::Choice { values, .. } => values.first().copied(),
+        _ => None,
+    }
+}
+
+/// The value after `value` (any case) among the words of a flag or choice
+/// keyword, wrapping around: `yes` and `no` swap. `None` for other kinds
+/// and for a value that is not one of the words.
+///
+/// ```
+/// use rustorm_core::next_choice;
+/// assert_eq!(next_choice("Compression", "yes"), Some("no"));
+/// assert_eq!(next_choice("StrictHostKeyChecking", "ask"), Some("accept-new"));
+/// assert_eq!(next_choice("User", "travis"), None);
+/// ```
+pub fn next_choice(key: &str, value: &str) -> Option<&'static str> {
+    let words = match key_spec(key)?.kind {
+        KeyType::Flag => YES_NO,
+        KeyType::Choice { values, .. } => values,
+        _ => return None,
+    };
+    let at = words
+        .iter()
+        .position(|w| w.eq_ignore_ascii_case(value.trim()))?;
+    Some(words[(at + 1) % words.len()])
+}
+
+/// Keywords that start a block; completed only at column 0.
+const BLOCK_KEYS: &[&str] = &["Host", "Match", "Include"];
+
+/// A keyword suggestion for the first word of a line being typed. Columns
+/// and ranges count characters, as editor cursors do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineCompletion {
+    /// The keyword in canonical spelling.
+    pub keyword: &'static str,
+    /// The typed word, which accepting replaces.
+    pub word: std::ops::Range<usize>,
+    /// The value accepting inserts after the keyword (see
+    /// [`premade_value`]).
+    pub premade: Option<&'static str>,
+}
+
+/// A line after accepting a [`LineCompletion`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Accepted {
+    /// The new line.
+    pub line: String,
+    /// The cursor column: after the premade value, else after the space
+    /// that follows the keyword.
+    pub cursor: usize,
+    /// The premade value's columns, to select so typing replaces it.
+    pub select: Option<std::ops::Range<usize>>,
+}
+
+impl LineCompletion {
+    /// The hint to show dimmed after the cursor: the rest of the keyword
+    /// when the typed word starts it, else ` → Keyword`.
+    pub fn ghost(&self, line: &str) -> String {
+        let typed: String = line
+            .chars()
+            .skip(self.word.start)
+            .take(self.word.len())
+            .collect();
+        let lower = self.keyword.to_ascii_lowercase();
+        if lower.starts_with(&typed.to_ascii_lowercase()) {
+            self.keyword.chars().skip(self.word.len()).collect()
+        } else {
+            format!(" → {}", self.keyword)
+        }
+    }
+
+    /// `line` with the typed word replaced by the keyword, a space and the
+    /// premade value. Text after the word is kept as it is.
+    pub fn accept(&self, line: &str) -> Accepted {
+        let chars: Vec<char> = line.chars().collect();
+        let mut out: String = chars[..self.word.start].iter().collect();
+        out.push_str(self.keyword);
+        out.push(' ');
+        let start = out.chars().count();
+        let select = self.premade.map(|v| {
+            out.push_str(v);
+            start..start + v.chars().count()
+        });
+        let cursor = out.chars().count();
+        out.extend(&chars[self.word.end..]);
+        Accepted {
+            line: out,
+            cursor,
+            select,
+        }
+    }
+}
+
+/// The keyword suggestion for `line` with the cursor at column `col`, when
+/// the cursor ends the line's first word: settable keywords on an indented
+/// line, `Host`, `Match` and `Include` at column 0, matched as
+/// [`complete_setting`] does. `None` in a comment, a value, the middle of a
+/// word, or when nothing matches.
+///
+/// ```
+/// use rustorm_core::complete_line;
+/// let c = complete_line("    por", 7).unwrap();
+/// assert_eq!(c.keyword, "Port");
+/// assert_eq!(c.accept("    por").line, "    Port 22");
+/// assert_eq!(complete_line("ho", 2).unwrap().keyword, "Host");
+/// assert!(complete_line("    User tra", 12).is_none());
+/// ```
+pub fn complete_line(line: &str, col: usize) -> Option<LineCompletion> {
+    let chars: Vec<char> = line.chars().collect();
+    let indent = chars.iter().take_while(|c| c.is_whitespace()).count();
+    if col <= indent || col > chars.len() {
+        return None;
+    }
+    let word = &chars[indent..col];
+    if word[0] == '#' || word.iter().any(|c| c.is_whitespace() || *c == '=') {
+        return None;
+    }
+    if chars
+        .get(col)
+        .is_some_and(|c| !c.is_whitespace() && *c != '=')
+    {
+        return None;
+    }
+    let typed: String = word.iter().collect();
+    let keyword = if indent == 0 {
+        complete_from(BLOCK_KEYS, &typed)
+    } else {
+        complete_setting(&typed)
+    }
+    .into_iter()
+    .next()?;
+    Some(LineCompletion {
+        keyword,
+        word: indent..col,
+        premade: premade_value(keyword),
+    })
+}
+
+/// The swap for the value under column `col` of `line` (`Key value` or
+/// `Key=value`): its columns and the next word (see [`next_choice`]).
+/// `None` off the value, or when the value does not cycle.
+///
+/// ```
+/// use rustorm_core::swap_value;
+/// assert_eq!(swap_value("    Compression yes", 19), Some((16..19, "no")));
+/// assert_eq!(swap_value("    User travis", 12), None);
+/// ```
+pub fn swap_value(line: &str, col: usize) -> Option<(std::ops::Range<usize>, &'static str)> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = chars.iter().take_while(|c| c.is_whitespace()).count();
+    let key_start = i;
+    while i < chars.len() && !chars[i].is_whitespace() && chars[i] != '=' {
+        i += 1;
+    }
+    let key: String = chars[key_start..i].iter().collect();
+    while i < chars.len() && (chars[i].is_whitespace() || chars[i] == '=') {
+        i += 1;
+    }
+    let start = i;
+    while i < chars.len() && !chars[i].is_whitespace() {
+        i += 1;
+    }
+    let end = i;
+    if start == end
+        || !(start..=end).contains(&col)
+        || chars[end..].iter().any(|c| !c.is_whitespace())
+    {
+        return None;
+    }
+    let value: String = chars[start..end].iter().collect();
+    next_choice(&key, &value).map(|next| (start..end, next))
+}
+
 /// Checks `value` for `key`. An unknown keyword only needs a value on one
 /// line. `Err` is the reason, without the key name.
 ///
@@ -343,12 +600,21 @@ pub struct SettingRow {
     pub original: String,
     /// What `Host *` gives the host for this key, shown while unset.
     pub inherited: Option<String>,
+    /// Added through [`SettingsDraft::add_key`] since the draft was made.
+    pub added: bool,
 }
 
 impl SettingRow {
     /// True when the value differs from the loaded one.
     pub fn changed(&self) -> bool {
         self.value.trim() != self.original.trim()
+    }
+
+    /// True when the row shows in the filled view: it has a loaded or
+    /// edited value, or was added this session. A loaded value the user
+    /// clears stays filled until the draft is dropped.
+    pub fn filled(&self) -> bool {
+        self.added || !self.original.trim().is_empty() || !self.value.trim().is_empty()
     }
 
     /// The words a flag or choice offers, in order; `None` for typed kinds.
@@ -408,6 +674,7 @@ impl SettingsDraft {
                     value: v.clone(),
                     original: v,
                     inherited: inherited.clone(),
+                    added: false,
                 };
                 let values = block.get_all(spec.key);
                 if spec.multi {
@@ -459,6 +726,43 @@ impl SettingsDraft {
         Ok(out)
     }
 
+    /// Indices of the rows the filled view shows, in form order (see
+    /// [`SettingRow::filled`]); the all view shows every row.
+    pub fn filled_rows(&self) -> Vec<usize> {
+        (0..self.rows.len())
+            .filter(|&i| self.rows[i].filled())
+            .collect()
+    }
+
+    /// The keywords offered for `typed` text in an Add setting field: see
+    /// [`complete_setting`].
+    pub fn complete(&self, typed: &str) -> Vec<&'static str> {
+        complete_setting(typed)
+    }
+
+    /// Adds `key` (any case) to the filled view and returns the row to
+    /// focus: the existing row of a single-value key the host sets, else an
+    /// empty row marked added (for a repeatable key, a row after its
+    /// values). `None` for a keyword a host cannot set. The value is left
+    /// as it is; a form may prefill [`premade_value`].
+    pub fn add_key(&mut self, key: &str) -> Option<usize> {
+        let spec = key_spec(key)?;
+        let first = self.rows.iter().position(|r| r.spec.key == spec.key)?;
+        if !spec.multi {
+            if !self.rows[first].filled() {
+                self.rows[first].added = true;
+            }
+            return Some(first);
+        }
+        let mut last = self.rows.iter().rposition(|r| r.spec.key == spec.key)?;
+        if !self.rows[last].value.trim().is_empty() {
+            self.grow(last);
+            last += 1;
+        }
+        self.rows[last].added = true;
+        Some(last)
+    }
+
     /// Once the last row of a multi-valued key holds a value, adds an empty
     /// row after it, so another value can always be added. `i` is any row
     /// of the key.
@@ -474,6 +778,7 @@ impl SettingsDraft {
             let mut blank = self.rows[last].clone();
             blank.value.clear();
             blank.original.clear();
+            blank.added = false;
             self.rows.insert(last + 1, blank);
         }
     }
