@@ -1053,12 +1053,23 @@ impl App {
                 if f(0).is_empty() {
                     return Err("New name is required.".into());
                 }
+                // The prefilled section is the source's own; only a changed
+                // one is passed, so the clone reads as the CLI's `clone`.
+                let own = self
+                    .rows
+                    .iter()
+                    .find(|r| &r.name == source)
+                    .and_then(|r| r.section.clone());
+                let section = opt(f(1)).filter(|s| {
+                    own.as_deref()
+                        .is_none_or(|old| !old.eq_ignore_ascii_case(s))
+                });
                 Ok(Op::Clone(CloneSpec {
                     source: source.clone(),
                     new_name: f(0),
                     keep_hostname: false,
                     overrides: Vec::new(),
-                    section: opt(f(1)),
+                    section,
                 }))
             }
             FormKind::Move { name, section } => {

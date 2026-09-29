@@ -4,6 +4,7 @@ members = [
     "crates/rustorm",
     "crates/rustorm-tui",
     "crates/rustorm-gui",
+    "crates/rustorm-parity",
 ]
 resolver = "2"
 

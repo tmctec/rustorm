@@ -1,6 +1,8 @@
 //! The writes the GUI makes, each a sequence of `rustorm_core` operations.
 
-use rustorm_core::{AddSpec, CloneSpec, EditSpec, Env, HostSelector, SettingChange, Workspace};
+use rustorm_core::{
+    AddSpec, CloneSpec, EditSpec, Env, HostSelector, SectionRename, SettingChange, Workspace,
+};
 
 /// One write the user asked for from the Hosts tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +53,16 @@ pub enum Op {
         /// The section name.
         name: String,
     },
+    /// Rename a section; a name another section already has merges into it.
+    RenameSection {
+        /// The section's current name.
+        old: String,
+        /// The new name.
+        new: String,
+        /// The file holding it, as a `--file` argument, when the name is in
+        /// two files.
+        file: Option<String>,
+    },
     /// The All settings section: sets and unsets several keys of one host
     /// in one write.
     Settings {
@@ -86,7 +98,7 @@ impl Op {
             | Op::Settings { name, .. } => vec![name.clone()],
             Op::Edit { original, name, .. } => vec![original.clone(), name.trim().to_string()],
             Op::Clone { source, new_name } => vec![source.clone(), new_name.trim().to_string()],
-            Op::AddSection { .. } => Vec::new(),
+            Op::AddSection { .. } | Op::RenameSection { .. } => Vec::new(),
         }
     }
 
@@ -226,6 +238,24 @@ impl Op {
                 Ok(Outcome {
                     message: said(change.messages, format!("{name} updated.")),
                     select: Some(name.clone()),
+                })
+            }
+            Op::RenameSection { old, new, file } => {
+                let new = non_empty(new).ok_or_else(|| {
+                    rustorm_core::Error::Usage("a section name is required.".to_string())
+                })?;
+                let change = ws.rename_section(old, &new, file.as_deref())?;
+                let single = match &change.value {
+                    SectionRename::Renamed { from, to } => {
+                        format!("section {from} renamed to {to}.")
+                    }
+                    SectionRename::Merged { from, into } => {
+                        format!("section {from} merged into {into}.")
+                    }
+                };
+                Ok(Outcome {
+                    message: said(change.messages, single),
+                    select: None,
                 })
             }
             Op::AddSection { name } => {

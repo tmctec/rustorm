@@ -140,6 +140,18 @@ pub enum Dialog {
         /// The core's message for a refused move.
         error: Option<String>,
     },
+    /// Asks for a section's new name.
+    RenameSection {
+        /// The section's current name.
+        old: String,
+        /// The file holding it, when another file holds a section of the
+        /// same name.
+        file: Option<usize>,
+        /// The typed name.
+        name: String,
+        /// The core's message for a refused rename.
+        error: Option<String>,
+    },
     /// Asks for a new section's name.
     AddSection {
         /// The typed name.
@@ -667,7 +679,8 @@ impl App {
         match &mut self.dialog {
             Some(Dialog::Clone { error, .. })
             | Some(Dialog::Move { error, .. })
-            | Some(Dialog::AddSection { error, .. }) => *error = Some(message.clone()),
+            | Some(Dialog::AddSection { error, .. })
+            | Some(Dialog::RenameSection { error, .. }) => *error = Some(message.clone()),
             _ => {
                 if let Some(form) = &mut self.form {
                     form.error = Some(message.clone());
@@ -760,7 +773,7 @@ impl App {
         self.dialog = None;
         match outcome.select {
             Some(name) => self.select(&name),
-            None if matches!(op, Op::AddSection { .. }) => {}
+            None if matches!(op, Op::AddSection { .. } | Op::RenameSection { .. }) => {}
             None => {
                 self.selected = None;
                 self.form = None;
@@ -825,9 +838,9 @@ impl App {
         self.follow_includes();
         self.refresh();
         self.status = if self.is_multi() {
-            format!("saved {}.", self.ws.display(self.current))
+            format!("Saved {}.", self.ws.display(self.current))
         } else {
-            "saved.".to_string()
+            "Saved.".to_string()
         };
         if let Some(sel) = self.selected.clone() {
             self.select(&sel);
@@ -1172,6 +1185,29 @@ impl App {
                 name: String::new(),
                 error: None,
             });
+        }
+        let picked = self.filters.sidebar.clone();
+        if ui
+            .add_enabled(
+                picked.is_some() && !self.editor_dirty(),
+                Button::new("Rename section…"),
+            )
+            .on_disabled_hover_text("Select a section first")
+            .clicked()
+        {
+            if let Some(old) = picked {
+                let file = self.filters.section_file.filter(|&f| {
+                    self.file_sections
+                        .iter()
+                        .any(|o| o.index != f && o.name.eq_ignore_ascii_case(&old))
+                });
+                self.dialog = Some(Dialog::RenameSection {
+                    name: old.clone(),
+                    old,
+                    file,
+                    error: None,
+                });
+            }
         }
         if multi {
             ui.add_space(10.0);
@@ -1817,6 +1853,46 @@ impl App {
                     });
                     if go && !close {
                         self.run(Op::AddSection { name });
+                    }
+                }
+                Dialog::RenameSection {
+                    old,
+                    file,
+                    mut name,
+                    error,
+                } => {
+                    ui.heading(format!("Rename section {old}"));
+                    let l = ui.label("New section name");
+                    let resp = ui.text_edit_singleline(&mut name).labelled_by(l.id);
+                    if ui.memory(|m| m.focused().is_none()) {
+                        resp.request_focus();
+                    }
+                    if let Some(e) = &error {
+                        ui.colored_label(ui.visuals().error_fg_color, format!("⚠ {e}"));
+                    }
+                    let mut go = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                        go |= ui.button("Rename").clicked();
+                    });
+                    self.dialog = Some(Dialog::RenameSection {
+                        old: old.clone(),
+                        file,
+                        name: name.clone(),
+                        error,
+                    });
+                    if go && !close {
+                        let file = file.map(|i| self.ws.abs(i).display().to_string());
+                        if self.run(Op::RenameSection {
+                            old,
+                            new: name,
+                            file,
+                        }) {
+                            self.filters.sidebar = None;
+                            self.filters.section_file = None;
+                        }
                     }
                 }
                 Dialog::Move {
