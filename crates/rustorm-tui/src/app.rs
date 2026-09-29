@@ -454,6 +454,9 @@ const HELP: &[(&str, &str, &str)] = &[
     ("R", "sections", "rename section"),
     ("n", "table, sections", "new empty section"),
     ("o", "table", "open editor at host"),
+    ("Space", "editor", "accept keyword completion"),
+    ("Ctrl-Space", "editor", "swap yes/no or choice value"),
+    ("Ctrl-T", "settings form", "filled / all settings"),
     ("Ctrl-S", "editor", "save"),
     ("Ctrl-R", "editor", "discard edits"),
     ("Esc", "editor, form, prompt", "back / cancel"),
@@ -564,6 +567,11 @@ impl App {
         self.editors[self.cur].cursor()
     }
 
+    /// The editor's selection as `(start, end)` `(row, col)` pairs, if any.
+    pub fn editor_selection(&self) -> Option<((usize, usize), (usize, usize))> {
+        self.editors[self.cur].area.selection_range()
+    }
+
     /// True when the buffer on screen differs from its file as loaded.
     pub fn is_editor_modified(&self) -> bool {
         self.is_dirty(self.cur)
@@ -593,12 +601,21 @@ impl App {
     }
 
     /// The settings form's focused keyword and its value, while the form
-    /// is open.
+    /// is open; on the Add setting row, `"Add setting"` and its text.
     pub fn settings_row(&self) -> Option<(&str, &str)> {
         match &self.mode {
-            Mode::Settings(f) => Some((f.row().spec.key, f.row().value.as_str())),
+            Mode::Settings(f) => Some(match f.row() {
+                Some(r) => (r.spec.key, r.value.as_str()),
+                None => ("Add setting", f.adding.as_str()),
+            }),
             _ => None,
         }
+    }
+
+    /// The settings form's focused value is premade and selected, so
+    /// typing replaces it.
+    pub fn settings_value_selected(&self) -> bool {
+        matches!(&self.mode, Mode::Settings(f) if f.fresh)
     }
 
     /// The active filters.
@@ -676,8 +693,8 @@ impl App {
     }
 
     /// Shows the selected host's file in the editor with the cursor on its
-    /// `Host` line: the buffer's line first, so unsaved edits that moved it
-    /// are honored, else the line on disk.
+    /// `Host` line and that line first in the pane: the buffer's line first,
+    /// so unsaved edits that moved it are honored, else the line on disk.
     fn show_selected_host(&mut self) {
         let Some(row) = self.selected_row() else {
             return;
@@ -692,7 +709,7 @@ impl App {
                 .map(|l| config.host_line(l).saturating_sub(1))
         });
         if let Some(line) = line {
-            self.editors[fi].jump(line);
+            self.editors[fi].show_at_top(line);
         }
     }
 
@@ -1036,12 +1053,23 @@ impl App {
                 if f(0).is_empty() {
                     return Err("New name is required.".into());
                 }
+                // The prefilled section is the source's own; only a changed
+                // one is passed, so the clone reads as the CLI's `clone`.
+                let own = self
+                    .rows
+                    .iter()
+                    .find(|r| &r.name == source)
+                    .and_then(|r| r.section.clone());
+                let section = opt(f(1)).filter(|s| {
+                    own.as_deref()
+                        .is_none_or(|old| !old.eq_ignore_ascii_case(s))
+                });
                 Ok(Op::Clone(CloneSpec {
                     source: source.clone(),
                     new_name: f(0),
                     keep_hostname: false,
                     overrides: Vec::new(),
-                    section: opt(f(1)),
+                    section,
                 }))
             }
             FormKind::Move { name, section } => {
@@ -1139,20 +1167,30 @@ impl App {
 
     fn handle_settings(&mut self, mut form: SettingsForm, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let adding = form.focus.is_none();
+        if !matches!(key.code, KeyCode::Char(_) | KeyCode::Backspace) || ctrl {
+            form.fresh = false;
+        }
         match key.code {
+            KeyCode::Esc if adding && !form.adding.is_empty() => {
+                form.adding.clear();
+                form.error = None;
+            }
             KeyCode::Esc => {
                 self.msg = Some(Msg::Info("Cancelled.".into()));
                 return;
             }
+            KeyCode::Char('t') if ctrl => form.toggle(),
+            KeyCode::Tab if adding && !form.adding.is_empty() => form.accept(),
             KeyCode::Down | KeyCode::Tab => form.move_by(1),
             KeyCode::Up | KeyCode::BackTab => form.move_by(-1),
             KeyCode::PageDown => form.jump_group(true),
             KeyCode::PageUp => form.jump_group(false),
-            KeyCode::Home => form.focus = 0,
+            KeyCode::Home => form.first(),
             KeyCode::End => form.last(),
             KeyCode::Right => form.cycle(true),
             KeyCode::Left => form.cycle(false),
-            KeyCode::Char(' ') => form.space(),
+            KeyCode::Char(' ') if !ctrl => form.space(),
             KeyCode::Char('u') if ctrl => form.clear(),
             KeyCode::Backspace => form.backspace(),
             KeyCode::Enter => {
@@ -1371,6 +1409,10 @@ impl App {
             KeyCode::Esc => self.focus = Focus::Table,
             KeyCode::Tab => self.cycle_focus(false),
             KeyCode::BackTab => self.cycle_focus(true),
+            KeyCode::Char(' ') if ctrl => {
+                self.editors[self.cur].swap_value();
+            }
+            KeyCode::Char(' ') if self.editors[self.cur].accept_completion() => {}
             _ => {
                 self.editors[self.cur].area.input(key);
             }
@@ -1870,7 +1912,7 @@ impl App {
         let text = match (&self.mode, self.focus) {
             (Mode::Form(_), _) => "Enter:submit  Tab:next field  Shift-Tab:previous  Esc:cancel",
             (Mode::Settings(_), _) => {
-                "Enter:save  Up/Down:move  Space/Left/Right:cycle  Ctrl-U:clear  PgUp/PgDn:group  Esc:cancel"
+                "Enter:save  Up/Down:move  Space/Left/Right:cycle  Ctrl-U:clear  Ctrl-T:filled/all  PgUp/PgDn:group  Esc:cancel"
             }
             (Mode::Prompt(_), _) => "answer the prompt  Esc:cancel",
             (Mode::Filter { .. }, _) | (Mode::PickFilterColumn, _) => {
@@ -1892,7 +1934,7 @@ impl App {
             (_, Focus::Sections) => {
                 "?:help  q:quit  Tab:focus  Enter:filter to section  R:rename section  n:new section"
             }
-            (_, Focus::Editor) => "Ctrl-S:save  Ctrl-R:discard  Esc:back to table  Tab:focus  Ctrl-C:quit",
+            (_, Focus::Editor) => "Ctrl-S:save  Ctrl-R:discard  Space:accept keyword  Ctrl-Space:swap value  Esc:back to table  Tab:focus  Ctrl-C:quit",
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -1961,7 +2003,8 @@ impl App {
         let room = height.saturating_sub(4) as usize;
         let mut lines: Vec<(Line, bool)> = Vec::new();
         let mut group = None;
-        for (i, r) in form.draft.rows.iter().enumerate() {
+        for i in form.shown() {
+            let r = &form.draft.rows[i];
             if group != Some(r.spec.group) {
                 group = Some(r.spec.group);
                 lines.push((
@@ -1972,7 +2015,7 @@ impl App {
                     false,
                 ));
             }
-            let focused = i == form.focus;
+            let focused = Some(i) == form.focus;
             let marker = match (focused, r.changed()) {
                 (true, _) => "> ",
                 (false, true) => "* ",
@@ -1992,12 +2035,21 @@ impl App {
                     (None, true) => Span::raw(theme.caret().to_string()),
                     (None, false) => Span::styled(theme.missing(), theme.muted()),
                 }
+            } else if focused && form.fresh {
+                Span::styled(
+                    r.value.clone(),
+                    Style::default().add_modifier(Modifier::REVERSED),
+                )
             } else if focused {
                 Span::raw(format!("{}{}", r.value, theme.caret()))
             } else {
                 Span::raw(r.value.clone())
             };
             lines.push((Line::from(vec![key, value]), focused));
+        }
+        if !form.all {
+            lines.push((Line::from(""), false));
+            lines.push((self.add_setting_line(form), form.focus.is_none()));
         }
         let at = lines.iter().position(|(_, f)| *f).unwrap_or(0);
         let top = at
@@ -2009,20 +2061,68 @@ impl App {
             .take(room)
             .map(|(l, _)| l)
             .collect();
-        shown.push(match &form.error {
-            Some(e) => Line::from(Span::styled(format!("Error: {e}"), theme.error())),
-            None => Line::from(""),
+        shown.push(match (&form.error, form.focus) {
+            (Some(e), Some(_)) => Line::from(Span::styled(format!("Error: {e}"), theme.error())),
+            _ => Line::from(""),
         });
         shown.push(Line::from(Span::styled(
-            "Enter: save  Space/Left/Right: cycle  Ctrl-U: clear  PgUp/PgDn: group  Esc: cancel",
+            "Enter: save  Space/Left/Right: cycle  Ctrl-U: clear  Ctrl-T: filled/all  PgUp/PgDn: group  Esc: cancel",
             theme.muted(),
         )));
+        let view = if form.all { "all" } else { "filled" };
         frame.render_widget(Clear, rect);
         frame.render_widget(
             Paragraph::new(shown)
-                .block(self.pane_block(format!("Settings {}", form.draft.host), true)),
+                .block(self.pane_block(format!("Settings {} ({view})", form.draft.host), true)),
             rect,
         );
+    }
+
+    /// The Add setting row: the typed text, the first matching keyword
+    /// completed inline and the other matches; or `no matching keyword`.
+    fn add_setting_line(&self, form: &SettingsForm) -> Line<'static> {
+        let theme = self.opts.theme;
+        let focused = form.focus.is_none();
+        let label = format!("{}{:<32}", if focused { "> " } else { "  " }, "Add setting");
+        let label_style = if focused {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let mut spans = vec![Span::styled(label, label_style)];
+        if !focused {
+            spans.push(Span::styled("type a keyword", theme.muted()));
+            return Line::from(spans);
+        }
+        spans.push(Span::raw(form.adding.clone()));
+        let matches = form.matches();
+        match matches.split_first() {
+            _ if form.adding.is_empty() => {
+                spans.push(Span::raw(theme.caret().to_string()));
+                spans.push(Span::styled(" type a keyword, Tab adds it", theme.muted()));
+            }
+            None => {
+                spans.push(Span::raw(theme.caret().to_string()));
+                spans.push(Span::styled("  no matching keyword", theme.error()));
+            }
+            Some((first, rest)) => {
+                let typed = form.adding.to_ascii_lowercase();
+                let ghost = if first.to_ascii_lowercase().starts_with(&typed) {
+                    first.chars().skip(form.adding.chars().count()).collect()
+                } else {
+                    format!(" → {first}")
+                };
+                spans.push(Span::raw(theme.caret().to_string()));
+                spans.push(Span::styled(ghost, theme.muted()));
+                if !rest.is_empty() {
+                    spans.push(Span::styled(
+                        format!("   also: {}", rest.join(", ")),
+                        theme.muted(),
+                    ));
+                }
+            }
+        }
+        Line::from(spans)
     }
 
     fn prompt_text(&self, p: &Prompt) -> String {

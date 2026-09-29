@@ -230,7 +230,7 @@ fn inc_gui_1_file_selector_and_save_writes_only_that_file() {
     assert!(!h.state().editor_dirty());
     let backup_label = format!("backup: {}", h.state().workspace().display_path(&backup));
     assert!(shown(&h, &backup_label), "the status bar shows its backup");
-    assert!(shown_contains(&h, &format!("saved {ranch_label}.")));
+    assert!(shown_contains(&h, &format!("Saved {ranch_label}.")));
     assert!(
         !h.state().workspace().files.iter().any(|f| f.path == backup),
         "the backup is not loaded as a workspace file"

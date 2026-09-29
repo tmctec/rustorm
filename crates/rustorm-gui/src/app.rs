@@ -8,8 +8,8 @@ use egui::{
 };
 use egui_extras::{Column as TableColumn, TableBuilder};
 use rustorm_core::{
-    Config, Env, FileState, KeyGroup, SectionSummary, SettingsDraft, Workspace, WorkspaceSection,
-    WriteOptions,
+    complete_line, premade_value, swap_value, Config, Env, FileState, KeyGroup, SectionSummary,
+    SettingsDraft, Workspace, WorkspaceSection, WriteOptions,
 };
 
 use crate::highlight::highlight_job;
@@ -140,6 +140,18 @@ pub enum Dialog {
         /// The core's message for a refused move.
         error: Option<String>,
     },
+    /// Asks for a section's new name.
+    RenameSection {
+        /// The section's current name.
+        old: String,
+        /// The file holding it, when another file holds a section of the
+        /// same name.
+        file: Option<usize>,
+        /// The typed name.
+        name: String,
+        /// The core's message for a refused rename.
+        error: Option<String>,
+    },
     /// Asks for a new section's name.
     AddSection {
         /// The typed name.
@@ -187,6 +199,15 @@ pub struct App {
     settings: Option<SettingsDraft>,
     /// The last refused All settings save.
     settings_error: Option<String>,
+    /// The editor TextEdit's id, from the last frame it showed.
+    editor_id: Option<egui::Id>,
+    /// The keyword completion the editor shows after its cursor.
+    editor_ghost: Option<String>,
+    /// The editor's selection as character offsets, from its last frame.
+    editor_selection: Option<(usize, usize)>,
+    /// How All settings shows the draft: filled or all rows, and the Add
+    /// setting field.
+    settings_view: SettingsView,
     dialog: Option<Dialog>,
     editor_error: Option<String>,
     status: String,
@@ -227,6 +248,10 @@ impl App {
             form: None,
             settings: None,
             settings_error: None,
+            settings_view: SettingsView::default(),
+            editor_id: None,
+            editor_ghost: None,
+            editor_selection: None,
             dialog: None,
             editor_error: None,
             status: String::new(),
@@ -297,6 +322,18 @@ impl App {
     /// selected host.
     pub fn editor_line(&self) -> Option<usize> {
         self.editor_line
+    }
+
+    /// The keyword completion the editor offers after its cursor, as shown
+    /// dimmed: the rest of the keyword, or ` → Keyword`.
+    pub fn editor_suggestion(&self) -> Option<&str> {
+        self.editor_ghost.as_deref()
+    }
+
+    /// The editor's selection (or cursor, when both ends match) as character
+    /// offsets into the buffer, from the last frame.
+    pub fn editor_selection(&self) -> Option<(usize, usize)> {
+        self.editor_selection
     }
 
     /// The 1-based line the editor's cursor goes to when the Editor tab
@@ -513,6 +550,7 @@ impl App {
             SettingsDraft::new(name, self.ws.host(wl), defaults)
         });
         self.settings_error = None;
+        self.settings_view = SettingsView::default();
     }
 
     /// Points the editor at host `name` without leaving the Hosts tab: its
@@ -549,6 +587,26 @@ impl App {
     /// The selected host's All settings rows, as edited.
     pub fn settings(&self) -> Option<&SettingsDraft> {
         self.settings.as_ref()
+    }
+
+    /// True when All settings shows every keyword; false (the default each
+    /// time a host is selected) when it shows only the filled ones.
+    pub fn settings_show_all(&self) -> bool {
+        self.settings_view.all
+    }
+
+    /// The All settings rows on screen, as indices into the draft's rows.
+    pub fn settings_shown_rows(&self) -> Vec<usize> {
+        match &self.settings {
+            Some(d) if self.settings_view.all => (0..d.rows.len()).collect(),
+            Some(d) => d.filled_rows(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The Add setting field's message, e.g. "no matching keyword".
+    pub fn settings_add_error(&self) -> Option<&str> {
+        self.settings_view.add_error.as_deref()
     }
 
     /// The last refused All settings save.
@@ -621,7 +679,8 @@ impl App {
         match &mut self.dialog {
             Some(Dialog::Clone { error, .. })
             | Some(Dialog::Move { error, .. })
-            | Some(Dialog::AddSection { error, .. }) => *error = Some(message.clone()),
+            | Some(Dialog::AddSection { error, .. })
+            | Some(Dialog::RenameSection { error, .. }) => *error = Some(message.clone()),
             _ => {
                 if let Some(form) = &mut self.form {
                     form.error = Some(message.clone());
@@ -714,7 +773,7 @@ impl App {
         self.dialog = None;
         match outcome.select {
             Some(name) => self.select(&name),
-            None if matches!(op, Op::AddSection { .. }) => {}
+            None if matches!(op, Op::AddSection { .. } | Op::RenameSection { .. }) => {}
             None => {
                 self.selected = None;
                 self.form = None;
@@ -779,9 +838,9 @@ impl App {
         self.follow_includes();
         self.refresh();
         self.status = if self.is_multi() {
-            format!("saved {}.", self.ws.display(self.current))
+            format!("Saved {}.", self.ws.display(self.current))
         } else {
-            "saved.".to_string()
+            "Saved.".to_string()
         };
         if let Some(sel) = self.selected.clone() {
             self.select(&sel);
@@ -1127,6 +1186,29 @@ impl App {
                 error: None,
             });
         }
+        let picked = self.filters.sidebar.clone();
+        if ui
+            .add_enabled(
+                picked.is_some() && !self.editor_dirty(),
+                Button::new("Rename section…"),
+            )
+            .on_disabled_hover_text("Select a section first")
+            .clicked()
+        {
+            if let Some(old) = picked {
+                let file = self.filters.section_file.filter(|&f| {
+                    self.file_sections
+                        .iter()
+                        .any(|o| o.index != f && o.name.eq_ignore_ascii_case(&old))
+                });
+                self.dialog = Some(Dialog::RenameSection {
+                    name: old.clone(),
+                    old,
+                    file,
+                    error: None,
+                });
+            }
+        }
         if multi {
             ui.add_space(10.0);
             ui.heading("Files");
@@ -1441,21 +1523,47 @@ impl App {
                 };
                 let weak = ui.visuals().weak_text_color();
                 let err = ui.visuals().error_fg_color;
+                let view = &mut self.settings_view;
+                ui.horizontal(|ui| {
+                    ui.label("Show");
+                    ui.selectable_value(&mut view.all, false, "Filled");
+                    ui.selectable_value(&mut view.all, true, "All");
+                });
+                let shown: Vec<usize> = if view.all {
+                    (0..draft.rows.len()).collect()
+                } else {
+                    draft.filled_rows()
+                };
+                let mode = if view.all { "all" } else { "filled" };
                 egui::ScrollArea::vertical()
                     .id_salt("all-settings-scroll")
                     .max_height(460.0)
                     .show(ui, |ui| {
                         ui.add_enabled_ui(!blocked, |ui| {
                             for group in KeyGroup::ALL {
+                                if !shown.iter().any(|&i| draft.rows[i].spec.group == group) {
+                                    continue;
+                                }
                                 egui::CollapsingHeader::new(group.title())
-                                    .id_salt(("settings-group", group.title()))
-                                    .default_open(false)
+                                    .id_salt(("settings-group", mode, group.title()))
+                                    .default_open(!view.all)
                                     .show(ui, |ui| {
-                                        settings_group(ui, draft, group, weak, err);
+                                        settings_group(
+                                            ui,
+                                            draft,
+                                            group,
+                                            &shown,
+                                            &mut view.focus,
+                                            weak,
+                                            err,
+                                        );
                                     });
                             }
                         });
                     });
+                if !view.all {
+                    add_setting(ui, draft, view, blocked, weak, err);
+                }
                 let changes = draft.changes();
                 let pending = changes.as_ref().is_ok_and(|c| !c.is_empty());
                 ui.horizontal(|ui| {
@@ -1535,51 +1643,91 @@ impl App {
         let goto = self.goto_line.take();
         let current = self.current;
         let salt = self.ws.files[current].path.clone();
-        let row_height = ui.fonts_mut(|f| f.row_height(&FontId::monospace(13.0)));
         let buffer = &mut self.buffers[current];
-        let mut changed = false;
-        egui::ScrollArea::both()
+        let margin = egui::Margin::symmetric(4, 2);
+        // Row tops within the text, laid out as the editor lays it out.
+        let row_tops: Vec<f32> = layouter(ui, &*buffer, f32::INFINITY)
+            .rows
+            .iter()
+            .map(|r| r.rect().top())
+            .collect();
+        let mut scroll = egui::ScrollArea::both()
             .id_salt(("editor-scroll", &salt))
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                let resp = ui.add(
-                    TextEdit::multiline(buffer)
-                        .id_salt(("editor", &salt))
-                        .code_editor()
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(30)
-                        .layouter(&mut layouter),
+            .auto_shrink(false);
+        if let Some(&top) = goto.and_then(|line| row_tops.get(line.saturating_sub(1))) {
+            scroll = scroll.vertical_scroll_offset(f32::from(margin.top) + top);
+        }
+        let mut changed = false;
+        let editor_id = self.editor_id;
+        let mut ghost = None;
+        let mut selection = None;
+        let mut new_id = None;
+        scroll.show(ui, |ui| {
+            if let Some(id) = editor_id.filter(|id| ui.memory(|m| m.has_focus(*id))) {
+                changed |= complete_in_editor(ui, id, buffer);
+            }
+            let out = TextEdit::multiline(buffer)
+                .id_salt(("editor", &salt))
+                .code_editor()
+                .margin(margin)
+                .desired_width(f32::INFINITY)
+                .desired_rows(30)
+                .layouter(&mut layouter)
+                .show(ui);
+            let resp = out.response.clone();
+            set_label(ui, resp.id, "config editor");
+            new_id = Some(resp.id);
+            changed |= resp.changed();
+            if let Some(range) = out.cursor_range {
+                let (a, b) = (
+                    usize::from(range.primary.index),
+                    usize::from(range.secondary.index),
                 );
-                set_label(ui, resp.id, "config editor");
-                changed = resp.changed();
-                if let Some(line) = goto {
-                    let char_index: usize = buffer
-                        .split_inclusive('\n')
-                        .take(line.saturating_sub(1))
-                        .map(|l| l.chars().count())
-                        .sum();
-                    let mut state = TextEdit::load_state(ui.ctx(), resp.id).unwrap_or_default();
-                    state
-                        .cursor
-                        .set_char_range(Some(egui::text::CCursorRange::one(
-                            egui::text::CCursor::new(char_index),
-                        )));
-                    TextEdit::store_state(ui.ctx(), resp.id, state);
-                    resp.request_focus();
-                    let top = resp.rect.top() + row_height * line.saturating_sub(1) as f32;
-                    let target = egui::Rect::from_min_size(
-                        egui::pos2(resp.rect.left(), top),
-                        egui::vec2(1.0, row_height),
-                    );
-                    ui.scroll_to_rect(target, Some(egui::Align::TOP));
+                selection = Some((a.min(b), a.max(b)));
+                if a == b && resp.has_focus() {
+                    let (line, col) = line_at(buffer, a);
+                    if let Some(c) = complete_line(line, col) {
+                        let hint = c.ghost(line);
+                        let at = out.galley.pos_from_cursor(range.primary);
+                        ui.painter().text(
+                            out.galley_pos + at.right_top().to_vec2(),
+                            egui::Align2::LEFT_TOP,
+                            &hint,
+                            FontId::monospace(13.0),
+                            ui.visuals().weak_text_color(),
+                        );
+                        ghost = Some(hint);
+                    }
                 }
-            });
+            }
+            // Room below the text for the last row to scroll to the top.
+            let last = f32::from(margin.top) + row_tops.last().copied().unwrap_or(0.0);
+            ui.add_space((last + ui.clip_rect().height() - resp.rect.height()).max(0.0));
+            if let Some(line) = goto {
+                let char_index: usize = buffer
+                    .split_inclusive('\n')
+                    .take(line.saturating_sub(1))
+                    .map(|l| l.chars().count())
+                    .sum();
+                let mut state = TextEdit::load_state(ui.ctx(), resp.id).unwrap_or_default();
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(
+                        egui::text::CCursor::new(char_index),
+                    )));
+                TextEdit::store_state(ui.ctx(), resp.id, state);
+                resp.request_focus();
+            }
+        });
         if changed {
             self.editor_error = None;
         }
         if goto.is_some() {
             self.editor_line = goto;
         }
+        self.editor_id = new_id;
+        self.editor_ghost = ghost;
+        self.editor_selection = selection;
     }
 
     /// The popup above the editor that picks the file it shows: every file
@@ -1705,6 +1853,46 @@ impl App {
                     });
                     if go && !close {
                         self.run(Op::AddSection { name });
+                    }
+                }
+                Dialog::RenameSection {
+                    old,
+                    file,
+                    mut name,
+                    error,
+                } => {
+                    ui.heading(format!("Rename section {old}"));
+                    let l = ui.label("New section name");
+                    let resp = ui.text_edit_singleline(&mut name).labelled_by(l.id);
+                    if ui.memory(|m| m.focused().is_none()) {
+                        resp.request_focus();
+                    }
+                    if let Some(e) = &error {
+                        ui.colored_label(ui.visuals().error_fg_color, format!("⚠ {e}"));
+                    }
+                    let mut go = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                        go |= ui.button("Rename").clicked();
+                    });
+                    self.dialog = Some(Dialog::RenameSection {
+                        old: old.clone(),
+                        file,
+                        name: name.clone(),
+                        error,
+                    });
+                    if go && !close {
+                        let file = file.map(|i| self.ws.abs(i).display().to_string());
+                        if self.run(Op::RenameSection {
+                            old,
+                            new: name,
+                            file,
+                        }) {
+                            self.filters.sidebar = None;
+                            self.filters.section_file = None;
+                        }
                     }
                 }
                 Dialog::Move {
@@ -1878,6 +2066,8 @@ fn settings_group(
     ui: &mut Ui,
     draft: &mut SettingsDraft,
     group: KeyGroup,
+    shown: &[usize],
+    focus: &mut Option<usize>,
     weak: Color32,
     err: Color32,
 ) {
@@ -1888,7 +2078,7 @@ fn settings_group(
         .spacing([8.0, 4.0])
         .show(ui, |ui| {
             for (i, row) in draft.rows.iter_mut().enumerate() {
-                if row.spec.group != group {
+                if row.spec.group != group || !shown.contains(&i) {
                     continue;
                 }
                 let key = row.spec.key;
@@ -1918,6 +2108,10 @@ fn settings_group(
                             }
                         });
                     set_label(ui, resp.response.id, key);
+                    if *focus == Some(i) {
+                        resp.response.scroll_to_me(Some(egui::Align::Center));
+                        *focus = None;
+                    }
                 } else {
                     ui.horizontal(|ui| {
                         let hint = row
@@ -1931,6 +2125,10 @@ fn settings_group(
                                 .desired_width(220.0),
                         );
                         set_label(ui, resp.id, key);
+                        if *focus == Some(i) {
+                            focus_all(ui, &resp, row.value.chars().count());
+                            *focus = None;
+                        }
                         if let Some(words) = row.choices() {
                             ui.menu_button("▾", |ui| {
                                 for w in words {
@@ -1961,4 +2159,190 @@ fn settings_group(
     if let Some(i) = grow {
         draft.grow(i);
     }
+}
+
+/// How the All settings section shows its draft.
+#[derive(Debug, Clone, Default)]
+struct SettingsView {
+    /// Every keyword, instead of only the filled ones.
+    all: bool,
+    /// The Add setting field's text.
+    add: String,
+    /// "no matching keyword" after accepting text nothing matches.
+    add_error: Option<String>,
+    /// A row whose field takes focus on the next frame.
+    focus: Option<usize>,
+}
+
+/// Focuses the text field `resp` with its whole value selected, so typing
+/// replaces it.
+fn focus_all(ui: &Ui, resp: &egui::Response, len: usize) {
+    resp.request_focus();
+    resp.scroll_to_me(Some(egui::Align::Center));
+    let mut state = TextEdit::load_state(ui.ctx(), resp.id).unwrap_or_default();
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(0),
+            egui::text::CCursor::new(len),
+        )));
+    TextEdit::store_state(ui.ctx(), resp.id, state);
+}
+
+/// The filled view's Add setting field: typed text is matched against the
+/// keywords (see [`SettingsDraft::complete`]) and Tab or Enter adds the
+/// first match with its premade value, focused and selected.
+fn add_setting(
+    ui: &mut Ui,
+    draft: &mut SettingsDraft,
+    view: &mut SettingsView,
+    blocked: bool,
+    weak: Color32,
+    err: Color32,
+) {
+    let id = ui.make_persistent_id("settings-add");
+    let tab = !blocked
+        && ui.memory(|m| m.has_focus(id))
+        && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab));
+    let mut accept = tab;
+    ui.horizontal(|ui| {
+        let label = ui.label("Add setting");
+        let resp = ui.add_enabled(
+            !blocked,
+            TextEdit::singleline(&mut view.add)
+                .id(id)
+                .hint_text("type a keyword")
+                .desired_width(200.0),
+        );
+        resp.clone().labelled_by(label.id);
+        set_label(ui, resp.id, "Add setting");
+        if resp.changed() {
+            view.add_error = None;
+        }
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+            accept = true;
+        }
+    });
+    let typed = view.add.trim().to_string();
+    let matches = if typed.is_empty() {
+        Vec::new()
+    } else {
+        draft.complete(&typed)
+    };
+    if let Some((first, rest)) = matches.split_first() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(format!("→ {first}")).strong());
+            for m in rest.iter().take(6) {
+                ui.label(RichText::new(*m).color(weak));
+            }
+        });
+    }
+    if let Some(e) = &view.add_error {
+        ui.colored_label(err, e.as_str());
+    }
+    if !accept || typed.is_empty() {
+        return;
+    }
+    let Some(key) = matches.first() else {
+        view.add_error = Some("no matching keyword".to_string());
+        return;
+    };
+    if let Some(i) = draft.add_key(key) {
+        if draft.rows[i].value.trim().is_empty() {
+            if let Some(v) = premade_value(key) {
+                draft.rows[i].value = v.to_string();
+            }
+        }
+        view.focus = Some(i);
+    }
+    view.add.clear();
+    view.add_error = None;
+}
+
+/// The line holding character offset `at` of `text`, and `at`'s column in
+/// it (characters).
+fn line_at(text: &str, at: usize) -> (&str, usize) {
+    let mut start = 0;
+    let mut chars = 0;
+    for line in text.split_inclusive('\n') {
+        let n = line.chars().count();
+        if at < chars + n || !line.ends_with('\n') {
+            return (line.trim_end_matches('\n'), at - chars);
+        }
+        start += line.len();
+        chars += n;
+    }
+    (&text[start..], at - chars)
+}
+
+/// Replaces characters `range` of `text` with `with`.
+fn replace_chars(text: &mut String, range: std::ops::Range<usize>, with: &str) {
+    let byte = |c: usize| text.char_indices().nth(c).map_or(text.len(), |(b, _)| b);
+    let (a, b) = (byte(range.start), byte(range.end));
+    text.replace_range(a..b, with);
+}
+
+/// Keyword completion in the raw editor, before the TextEdit sees this
+/// frame's input: Space on a line whose first word has a completion
+/// accepts it (keyword, a space and the premade value, selected);
+/// Ctrl+Space swaps a yes/no or choice value under the cursor. True when
+/// the buffer changed.
+fn complete_in_editor(ui: &mut Ui, id: egui::Id, buffer: &mut String) -> bool {
+    let Some(mut state) = TextEdit::load_state(ui.ctx(), id) else {
+        return false;
+    };
+    let Some(range) = state.cursor.char_range() else {
+        return false;
+    };
+    let at = usize::from(range.primary.index);
+    let (line, col) = line_at(buffer, at);
+    let line_start = at - col;
+    let line = line.to_string();
+    let select = |state: &mut egui::widgets::text_edit::TextEditState, a: usize, b: usize| {
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(a),
+                egui::text::CCursor::new(b),
+            )));
+    };
+    if ui.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Space)) {
+        let Some((value, next)) = swap_value(&line, col) else {
+            return false;
+        };
+        let start = line_start + value.start;
+        replace_chars(buffer, start..line_start + value.end, next);
+        select(&mut state, start, start + next.chars().count());
+        TextEdit::store_state(ui.ctx(), id, state);
+        return true;
+    }
+    if range.primary.index != range.secondary.index {
+        return false;
+    }
+    let Some(completion) = complete_line(&line, col) else {
+        return false;
+    };
+    let space = ui.input_mut(|i| {
+        let pos = i
+            .events
+            .iter()
+            .position(|e| matches!(e, egui::Event::Text(t) if t == " "));
+        pos.map(|p| i.events.remove(p)).is_some()
+    });
+    if !space {
+        return false;
+    }
+    let accepted = completion.accept(&line);
+    let line_len = line.chars().count();
+    replace_chars(buffer, line_start..line_start + line_len, &accepted.line);
+    match accepted.select {
+        Some(r) => select(&mut state, line_start + r.start, line_start + r.end),
+        None => select(
+            &mut state,
+            line_start + accepted.cursor,
+            line_start + accepted.cursor,
+        ),
+    }
+    TextEdit::store_state(ui.ctx(), id, state);
+    true
 }

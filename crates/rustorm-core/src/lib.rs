@@ -48,8 +48,9 @@ pub use io::{
 };
 pub use keys::{canonical_key, is_known_key, is_multi_valued, KNOWN_KEYS, MULTI_VALUED_KEYS};
 pub use keyspec::{
-    key_spec, key_specs, validate_setting, KeyGroup, KeySpec, KeyType, SettingChange, SettingRow,
-    SettingsDraft,
+    complete_line, complete_setting, key_spec, key_specs, next_choice, premade_value, swap_value,
+    validate_setting, Accepted, KeyGroup, KeySpec, KeyType, LineCompletion, SettingChange,
+    SettingRow, SettingsDraft,
 };
 pub use lexer::{lex, lex_document, lex_line, Lexer, Span, SpanKind};
 pub use model::{

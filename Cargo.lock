@@ -3280,6 +3280,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustorm-parity"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "egui",
+ "egui_kittest",
+ "ratatui",
+ "rustorm-core",
+ "rustorm-gui",
+ "rustorm-tui",
+ "tempfile",
+]
+
+[[package]]
 name = "rustorm-tui"
 version = "0.1.0"
 dependencies = [

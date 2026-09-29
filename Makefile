@@ -56,7 +56,7 @@ build-production:  ## Build optimized release binaries for the whole workspace
 ##@ Test
 
 .PHONY: test
-test:  ## Run every crate's tests (core, cli examples, tui snapshots, gui kittest)
+test:  ## Run every crate's tests (core, cli examples, tui snapshots, gui kittest, tui/gui parity)
 	@./makehelp.sh test
 
 .PHONY: test-unit
@@ -81,8 +81,12 @@ test-gui:  ## Run the rustorm-gui kittest suite
 
 GUI_WALKTHROUGH ?= target/gui-walkthrough.txt
 
+.PHONY: test-parity
+test-parity:  ## Run the same 13 operations in the TUI and the GUI and compare the files they write
+	@./makehelp.sh test -p rustorm-parity
+
 .PHONY: test-gui-walkthrough
-test-gui-walkthrough:  ## Drive the GUI follow + All settings flows and write what they show to GUI_WALKTHROUGH
+test-gui-walkthrough:  ## Drive the GUI follow, settings (filled/all, Add setting) and editor completion flows; write what they show to GUI_WALKTHROUGH
 	@RUSTORM_GUI_EVIDENCE=$(abspath $(GUI_WALKTHROUGH)) ./makehelp.sh test -p rustorm-gui --test settings gui_walkthrough -- --ignored
 	@echo "walkthrough written to $(GUI_WALKTHROUGH)"
 
@@ -107,6 +111,10 @@ lint-tui:  ## Run clippy on rustorm-tui only
 .PHONY: lint-gui
 lint-gui:  ## Run clippy on rustorm-gui only
 	@./makehelp.sh lint rustorm-gui
+
+.PHONY: lint-parity
+lint-parity:  ## Run clippy on the rustorm-parity test crate only
+	@./makehelp.sh lint rustorm-parity
 
 .PHONY: fmt
 fmt:  ## Format code with cargo fmt

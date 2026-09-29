@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented here. Format follows [Keep a Changelog](https://keepachangelog.com).
 
+## [fieldfare] - 2026-09-29
+
+### Added
+- rustorm-tui and rustorm-gui: settings forms open on the host's filled keys (empty groups hidden); TUI `Ctrl-T` / GUI Filled–All toggle shows every keyword. An Add setting field completes keyword names as you type (prefix matches first, substring as fallback; algorithm lists only in full) and adds the first match with its premade value selected.
+- rustorm-tui and rustorm-gui: raw-editor keyword completion — dim ghost text after the cursor; Space accepts it with the keyword in canonical case, a space and the premade value selected; `Ctrl-Space` swaps a yes/no or fixed-choice value.
+- rustorm-gui: Rename section… in the sidebar (Op::RenameSection), merging into an existing name like the TUI's `R`.
+- rustorm-core `keyspec`: `SettingsDraft::filled_rows`/`complete`/`add_key`, `complete_setting`, `complete_line` (`LineCompletion::ghost`/`accept`), `premade_value`, `next_choice`, `swap_value` — shared by both UIs.
+- crates/rustorm-parity: test-only crate running 13 operations in the TUI (keys) and the GUI (kittest) on identical workspaces, requiring byte-identical files and backups equal to rustorm-core's result and matching messages; `make test-parity`, `make lint-parity`.
+- Regression tests: host_at_top (TUI top-1..8, GUI top-gui-1), settings filled view (fv-*), editor completion (ed-*), parity (par-1..13); 66 new catalog cases.
+
+### Fixed
+- rustorm-tui: a followed host (table move, `o`, after a write) puts its `Host` line at the top of the editor view (`Editor::show_at_top`), not on the bottom row after scrolling down.
+- rustorm-gui: the Editor tab scrolls a followed host's `Host` line exactly to the top in the same frame (the old `scroll_to_rect` target ignored the TextEdit margin and cut the line off), with bottom space so the last host reaches the top.
+- rustorm-gui: the editor save message reads "Saved <file>." as the TUI's does.
+- rustorm-tui: a clone keeps the source's section without naming it, so its message matches the CLI's `clone`.
+
+### Changed
+- TUI key overlay and editor help bar list Space (accept keyword), Ctrl-Space and Ctrl-T; tf-*/tf-gui-* tests switch to the all view first.
+- docs: tui.md, gui.md and USERGUIDE.md describe the host-at-top follow, filled view and Add setting, editor completion, and GUI rename section.
+
 ## [eagleray] - 2026-09-28
 
 ### Added

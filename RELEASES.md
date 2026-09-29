@@ -1,5 +1,16 @@
 # Releases
 
+## 2026-09-29 — Settings that fit on screen, and an editor that finishes your words
+
+**New**
+- The settings form now opens on just the settings a host actually has. Switch to see every setting when you need it, or start typing a name — `hostk` finds `HostKeyAlias` — and press Tab to add it, with a sensible value already filled in.
+- The config editor suggests the setting you're typing. Press Space to accept it and a common value is filled in and highlighted, ready to type over — `por` becomes `Port 22`. Ctrl-Space flips a `yes` to `no` or steps through a setting's choices.
+- The desktop app can rename a section, or merge it into another, straight from the sidebar.
+
+**Fixed**
+- When you move to a host, the editor now shows its `Host` line at the very top instead of at the bottom edge — in both the terminal and the desktop app, even for the last host in a file.
+- The terminal and desktop apps now make identical changes and report them the same way; a new set of side-by-side checks keeps it that way.
+
 ## 2026-09-28 — The editor follows you, and every setting is one keystroke away
 
 **New**
