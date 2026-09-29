@@ -30,8 +30,14 @@ fn core(text: &str, host: &str, changes: &[SettingChange]) -> String {
     c.render()
 }
 
-/// Selects `host` and opens All settings.
+/// Selects `host` and opens All settings showing every keyword.
 fn open(h: &mut Harness<'static, App>, host: &str) {
+    open_filled(h, host);
+    click(h, "All");
+}
+
+/// Selects `host` and opens All settings in its default filled view.
+fn open_filled(h: &mut Harness<'static, App>, host: &str) {
     h.run();
     click(h, host);
     click(h, "All settings");
@@ -294,6 +300,7 @@ fn gui_walkthrough_evidence() {
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num1);
     h.run();
     click(&mut h, "All settings");
+    click(&mut h, "All");
     click(&mut h, "Forwarding");
     let labels: Vec<String> = ["ForwardAgent", "LocalForward", "GatewayPorts", "Tunnel"]
         .iter()
@@ -323,4 +330,117 @@ fn gui_walkthrough_evidence() {
     writeln!(out, "backups: {backups:?}").unwrap();
     std::fs::write(out_path, out).unwrap();
     assert!(after.contains("ControlMaster auto"));
+}
+
+// ----- filled view and Add setting (R-settings-filled-view) -----
+
+fn shown_keys(h: &Harness<'static, App>) -> Vec<&'static str> {
+    let s = h.state();
+    let rows = &s.settings().unwrap().rows;
+    s.settings_shown_rows()
+        .into_iter()
+        .map(|i| rows[i].spec.key)
+        .collect()
+}
+
+/// fv-gui-1: All settings opens on the host's set keys only, with the
+/// Filled / All toggle and an Add setting field.
+#[test]
+fn fv_gui_1_opens_filled() {
+    let f = Fixture::new(LAB);
+    let mut h = harness(&f.path);
+    open_filled(&mut h, "lab");
+    assert!(!h.state().settings_show_all());
+    assert_eq!(shown_keys(&h), ["Compression", "HostName", "LocalForward"]);
+    assert!(h.query_all_by_label("Add setting").next().is_some());
+    assert!(h.query_all_by_label("Filled").next().is_some());
+    assert!(h.query_all_by_label("Proxy").next().is_none());
+    assert!(h.query_all_by_label("Connection").next().is_some());
+}
+
+/// fv-gui-2: All shows every keyword; Filled returns to the set keys.
+#[test]
+fn fv_gui_2_toggle_all_and_back() {
+    let f = Fixture::new(LAB);
+    let mut h = harness(&f.path);
+    open_filled(&mut h, "lab");
+    click(&mut h, "All");
+    assert!(h.state().settings_show_all());
+    assert_eq!(
+        h.state().settings_shown_rows().len(),
+        h.state().settings().unwrap().rows.len()
+    );
+    assert!(h.query_all_by_label("Proxy").next().is_some());
+    click(&mut h, "Filled");
+    assert_eq!(shown_keys(&h), ["Compression", "HostName", "LocalForward"]);
+}
+
+/// fv-gui-3: typing hostk suggests HostKeyAlias; Tab adds it with its field
+/// focused; Save writes the value.
+#[test]
+fn fv_gui_3_add_setting_by_typing() {
+    let f = Fixture::new(LAB);
+    let mut h = harness(&f.path);
+    open_filled(&mut h, "lab");
+    type_into(&mut h, "Add setting", "hostk");
+    assert!(h.query_all_by_label("→ HostKeyAlias").next().is_some());
+    h.key_press(egui::Key::Tab);
+    h.run();
+    assert!(shown_keys(&h).contains(&"HostKeyAlias"));
+    h.get_all_by_label("HostKeyAlias")
+        .last()
+        .unwrap()
+        .type_text("alias1");
+    h.run();
+    assert_eq!(value(&h, "HostKeyAlias", 0), "alias1");
+    click(&mut h, "Save settings");
+    assert_eq!(
+        f.read(),
+        core(LAB, "lab", &[SettingChange::set("HostKeyAlias", "alias1")])
+    );
+}
+
+/// fv-gui-4: an added choice keyword gets its drop-down, prefilled.
+#[test]
+fn fv_gui_4_added_choice_has_drop_down() {
+    let f = Fixture::new(LAB);
+    let mut h = harness(&f.path);
+    open_filled(&mut h, "lab");
+    type_into(&mut h, "Add setting", "stricth");
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert_eq!(value(&h, "StrictHostKeyChecking", 0), "yes");
+    pick(&mut h, "StrictHostKeyChecking", "accept-new");
+    assert_eq!(value(&h, "StrictHostKeyChecking", 0), "accept-new");
+}
+
+/// fv-gui-5: text matching no keyword adds nothing and says so.
+#[test]
+fn fv_gui_5_no_match() {
+    let f = Fixture::new(LAB);
+    let mut h = harness(&f.path);
+    open_filled(&mut h, "lab");
+    let before = shown_keys(&h);
+    type_into(&mut h, "Add setting", "zzz");
+    h.key_press(egui::Key::Tab);
+    h.run();
+    assert_eq!(h.state().settings_add_error(), Some("no matching keyword"));
+    assert_eq!(shown_keys(&h), before);
+    assert!(h.query_all_by_label("no matching keyword").next().is_some());
+}
+
+/// fv-14 (GUI): an added Port arrives as 22, selected, so typing replaces
+/// it.
+#[test]
+fn fv_14_gui_premade_value_is_selected() {
+    let f = Fixture::new(LAB);
+    let mut h = harness(&f.path);
+    open_filled(&mut h, "lab");
+    type_into(&mut h, "Add setting", "por");
+    h.key_press(egui::Key::Tab);
+    h.run();
+    assert_eq!(value(&h, "Port", 0), "22");
+    h.event(egui::Event::Text("2222".into()));
+    h.run();
+    assert_eq!(value(&h, "Port", 0), "2222");
 }

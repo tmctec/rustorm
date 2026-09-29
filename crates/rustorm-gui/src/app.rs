@@ -8,8 +8,8 @@ use egui::{
 };
 use egui_extras::{Column as TableColumn, TableBuilder};
 use rustorm_core::{
-    Config, Env, FileState, KeyGroup, SectionSummary, SettingsDraft, Workspace, WorkspaceSection,
-    WriteOptions,
+    premade_value, Config, Env, FileState, KeyGroup, SectionSummary, SettingsDraft, Workspace,
+    WorkspaceSection, WriteOptions,
 };
 
 use crate::highlight::highlight_job;
@@ -187,6 +187,9 @@ pub struct App {
     settings: Option<SettingsDraft>,
     /// The last refused All settings save.
     settings_error: Option<String>,
+    /// How All settings shows the draft: filled or all rows, and the Add
+    /// setting field.
+    settings_view: SettingsView,
     dialog: Option<Dialog>,
     editor_error: Option<String>,
     status: String,
@@ -227,6 +230,7 @@ impl App {
             form: None,
             settings: None,
             settings_error: None,
+            settings_view: SettingsView::default(),
             dialog: None,
             editor_error: None,
             status: String::new(),
@@ -513,6 +517,7 @@ impl App {
             SettingsDraft::new(name, self.ws.host(wl), defaults)
         });
         self.settings_error = None;
+        self.settings_view = SettingsView::default();
     }
 
     /// Points the editor at host `name` without leaving the Hosts tab: its
@@ -549,6 +554,26 @@ impl App {
     /// The selected host's All settings rows, as edited.
     pub fn settings(&self) -> Option<&SettingsDraft> {
         self.settings.as_ref()
+    }
+
+    /// True when All settings shows every keyword; false (the default each
+    /// time a host is selected) when it shows only the filled ones.
+    pub fn settings_show_all(&self) -> bool {
+        self.settings_view.all
+    }
+
+    /// The All settings rows on screen, as indices into the draft's rows.
+    pub fn settings_shown_rows(&self) -> Vec<usize> {
+        match &self.settings {
+            Some(d) if self.settings_view.all => (0..d.rows.len()).collect(),
+            Some(d) => d.filled_rows(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The Add setting field's message, e.g. "no matching keyword".
+    pub fn settings_add_error(&self) -> Option<&str> {
+        self.settings_view.add_error.as_deref()
     }
 
     /// The last refused All settings save.
@@ -1441,21 +1466,47 @@ impl App {
                 };
                 let weak = ui.visuals().weak_text_color();
                 let err = ui.visuals().error_fg_color;
+                let view = &mut self.settings_view;
+                ui.horizontal(|ui| {
+                    ui.label("Show");
+                    ui.selectable_value(&mut view.all, false, "Filled");
+                    ui.selectable_value(&mut view.all, true, "All");
+                });
+                let shown: Vec<usize> = if view.all {
+                    (0..draft.rows.len()).collect()
+                } else {
+                    draft.filled_rows()
+                };
+                let mode = if view.all { "all" } else { "filled" };
                 egui::ScrollArea::vertical()
                     .id_salt("all-settings-scroll")
                     .max_height(460.0)
                     .show(ui, |ui| {
                         ui.add_enabled_ui(!blocked, |ui| {
                             for group in KeyGroup::ALL {
+                                if !shown.iter().any(|&i| draft.rows[i].spec.group == group) {
+                                    continue;
+                                }
                                 egui::CollapsingHeader::new(group.title())
-                                    .id_salt(("settings-group", group.title()))
-                                    .default_open(false)
+                                    .id_salt(("settings-group", mode, group.title()))
+                                    .default_open(!view.all)
                                     .show(ui, |ui| {
-                                        settings_group(ui, draft, group, weak, err);
+                                        settings_group(
+                                            ui,
+                                            draft,
+                                            group,
+                                            &shown,
+                                            &mut view.focus,
+                                            weak,
+                                            err,
+                                        );
                                     });
                             }
                         });
                     });
+                if !view.all {
+                    add_setting(ui, draft, view, blocked, weak, err);
+                }
                 let changes = draft.changes();
                 let pending = changes.as_ref().is_ok_and(|c| !c.is_empty());
                 ui.horizontal(|ui| {
@@ -1885,6 +1936,8 @@ fn settings_group(
     ui: &mut Ui,
     draft: &mut SettingsDraft,
     group: KeyGroup,
+    shown: &[usize],
+    focus: &mut Option<usize>,
     weak: Color32,
     err: Color32,
 ) {
@@ -1895,7 +1948,7 @@ fn settings_group(
         .spacing([8.0, 4.0])
         .show(ui, |ui| {
             for (i, row) in draft.rows.iter_mut().enumerate() {
-                if row.spec.group != group {
+                if row.spec.group != group || !shown.contains(&i) {
                     continue;
                 }
                 let key = row.spec.key;
@@ -1925,6 +1978,10 @@ fn settings_group(
                             }
                         });
                     set_label(ui, resp.response.id, key);
+                    if *focus == Some(i) {
+                        resp.response.scroll_to_me(Some(egui::Align::Center));
+                        *focus = None;
+                    }
                 } else {
                     ui.horizontal(|ui| {
                         let hint = row
@@ -1938,6 +1995,10 @@ fn settings_group(
                                 .desired_width(220.0),
                         );
                         set_label(ui, resp.id, key);
+                        if *focus == Some(i) {
+                            focus_all(ui, &resp, row.value.chars().count());
+                            *focus = None;
+                        }
                         if let Some(words) = row.choices() {
                             ui.menu_button("▾", |ui| {
                                 for w in words {
@@ -1968,4 +2029,102 @@ fn settings_group(
     if let Some(i) = grow {
         draft.grow(i);
     }
+}
+
+/// How the All settings section shows its draft.
+#[derive(Debug, Clone, Default)]
+struct SettingsView {
+    /// Every keyword, instead of only the filled ones.
+    all: bool,
+    /// The Add setting field's text.
+    add: String,
+    /// "no matching keyword" after accepting text nothing matches.
+    add_error: Option<String>,
+    /// A row whose field takes focus on the next frame.
+    focus: Option<usize>,
+}
+
+/// Focuses the text field `resp` with its whole value selected, so typing
+/// replaces it.
+fn focus_all(ui: &Ui, resp: &egui::Response, len: usize) {
+    resp.request_focus();
+    resp.scroll_to_me(Some(egui::Align::Center));
+    let mut state = TextEdit::load_state(ui.ctx(), resp.id).unwrap_or_default();
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(0),
+            egui::text::CCursor::new(len),
+        )));
+    TextEdit::store_state(ui.ctx(), resp.id, state);
+}
+
+/// The filled view's Add setting field: typed text is matched against the
+/// keywords (see [`SettingsDraft::complete`]) and Tab or Enter adds the
+/// first match with its premade value, focused and selected.
+fn add_setting(
+    ui: &mut Ui,
+    draft: &mut SettingsDraft,
+    view: &mut SettingsView,
+    blocked: bool,
+    weak: Color32,
+    err: Color32,
+) {
+    let id = ui.make_persistent_id("settings-add");
+    let tab = !blocked
+        && ui.memory(|m| m.has_focus(id))
+        && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab));
+    let mut accept = tab;
+    ui.horizontal(|ui| {
+        let label = ui.label("Add setting");
+        let resp = ui.add_enabled(
+            !blocked,
+            TextEdit::singleline(&mut view.add)
+                .id(id)
+                .hint_text("type a keyword")
+                .desired_width(200.0),
+        );
+        resp.clone().labelled_by(label.id);
+        set_label(ui, resp.id, "Add setting");
+        if resp.changed() {
+            view.add_error = None;
+        }
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+            accept = true;
+        }
+    });
+    let typed = view.add.trim().to_string();
+    let matches = if typed.is_empty() {
+        Vec::new()
+    } else {
+        draft.complete(&typed)
+    };
+    if let Some((first, rest)) = matches.split_first() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(format!("→ {first}")).strong());
+            for m in rest.iter().take(6) {
+                ui.label(RichText::new(*m).color(weak));
+            }
+        });
+    }
+    if let Some(e) = &view.add_error {
+        ui.colored_label(err, e.as_str());
+    }
+    if !accept || typed.is_empty() {
+        return;
+    }
+    let Some(key) = matches.first() else {
+        view.add_error = Some("no matching keyword".to_string());
+        return;
+    };
+    if let Some(i) = draft.add_key(key) {
+        if draft.rows[i].value.trim().is_empty() {
+            if let Some(v) = premade_value(key) {
+                draft.rows[i].value = v.to_string();
+            }
+        }
+        view.focus = Some(i);
+    }
+    view.add.clear();
+    view.add_error = None;
 }
