@@ -742,6 +742,41 @@ impl Workspace {
         Ok((shown, warnings))
     }
 
+    /// The read commands' view of the host at `wl` (see
+    /// [`crate::projection`]): its block, section, absolute file path and
+    /// the workspace's `Host *`.
+    pub fn view(&self, wl: WorkspaceLocation) -> crate::projection::HostView<'_> {
+        let config = &self.files[wl.file].config;
+        crate::projection::HostView {
+            block: config.host(wl.loc),
+            section: config.section_name(wl.loc),
+            file: self.abs(wl.file),
+            defaults: self.defaults(),
+        }
+    }
+
+    /// The view of the host named `name` in file `file`, by primary name.
+    pub fn view_of(&self, file: usize, name: &str) -> Option<crate::projection::HostView<'_>> {
+        let loc = self.files[file].config.find_primary(name)?;
+        Some(self.view(WorkspaceLocation { file, loc }))
+    }
+
+    /// `show`'s entry for the host named `name` (primary name) in file
+    /// `file`, for a host picked by `--where` or `--section`.
+    pub fn shown_at(&self, file: usize, name: &str) -> Option<WorkspaceShown> {
+        let config = &self.files[file].config;
+        let loc = config.find_primary(name)?;
+        let h = config.host(loc);
+        Some(WorkspaceShown {
+            name: h.primary(),
+            file: self.abs(file),
+            section: config.section_name(loc).map(str::to_string),
+            text: h.text(),
+            meta: h.meta(),
+            index: file,
+        })
+    }
+
     /// `dump`: the text of the root, or of the file `--file` names.
     pub fn dump(&mut self, file: Option<&str>) -> Result<(usize, String)> {
         let i = self.target(file)?.unwrap_or(0);

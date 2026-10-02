@@ -306,17 +306,14 @@ impl HostBlock {
                 for &i in existing.iter().skip(1).rev() {
                     self.leading.remove(i);
                 }
-                let mut at = first + 1;
-                for v in &values[1..] {
-                    self.leading.insert(at, meta_line(key, v));
-                    at += 1;
+                for (i, v) in values[1..].iter().enumerate() {
+                    self.leading.insert(first + 1 + i, meta_line(key, v));
                 }
             }
             None => {
-                let mut at = self.meta_insert_index(key);
-                for v in &values {
-                    self.leading.insert(at, meta_line(key, v));
-                    at += 1;
+                let at = self.meta_insert_index(key);
+                for (i, v) in values.iter().enumerate() {
+                    self.leading.insert(at + i, meta_line(key, v));
                 }
             }
         }

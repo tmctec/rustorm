@@ -12,6 +12,8 @@
 //! - [`include`](mod@include): `Include` resolution the way ssh reads it.
 //! - [`keyspec`]: the value type and form group of every keyword.
 //! - [`meta`]: the `# key: value` metadata comments above a host.
+//! - [`projection`]: `--where`, `--filter`, `--format` and `--just-value`
+//!   for the read commands.
 //! - [`ops`]: one method on [`Config`] per `rustorm` command.
 //! - [`workspace`]: the root and its included files as one [`Workspace`],
 //!   with every command routed to the file it changes.
@@ -31,6 +33,7 @@ pub mod lexer;
 pub mod meta;
 pub mod model;
 pub mod ops;
+pub mod projection;
 pub mod uri;
 pub mod userconfig;
 pub mod workspace;
@@ -64,6 +67,10 @@ pub use ops::{
     pair_up, parse_option, validate_name, AddSpec, CheckReport, CloneSpec, EditSpec, Env,
     HostSelector, ListRow, Matcher, Moved, Placed, Problem, ProblemKind, SectionAdded,
     SectionRename, SectionSummary, ShownHost, Unaliased,
+};
+pub use projection::{
+    completion_keys, csv_field, missing, parse_filter, project, render, resolve, selected,
+    yaml_scalar, Cell, Format, HostView, Projected, Value, Where, WhereOp,
 };
 pub use uri::ConnectionUri;
 pub use userconfig::{ColorMode, UserConfig, UserDefaults};

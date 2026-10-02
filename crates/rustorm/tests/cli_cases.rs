@@ -72,6 +72,117 @@ fn err(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+const READ_FIXTURE: &str = "\
+Host *
+    Port 2200
+
+# tags: db
+Host d72
+    HostName 10.7.112.72
+    User travis
+
+Host plain
+    HostName plain.example.com
+";
+
+/// `set --tag/--untag` round-trip through the real binary (clap used to
+/// swallow `--tag` into the KEY VALUE positional); `show --filter` reads it.
+#[test]
+fn set_tag_and_untag_through_the_cli() {
+    let home = Home::new();
+    let c = home.file("read.conf", READ_FIXTURE);
+    let c = c.to_str().unwrap();
+    let out = home.run(&["--config", c, "set", "d72", "location", "Austin", "--tag", "prod", "--tag", "DB"]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    let file = std::fs::read_to_string(c).unwrap();
+    assert!(file.contains("# location: Austin\n# tags: db, prod\nHost d72\n"), "{file}");
+    assert!(!file.contains("--tag"), "a flag must never land in the body: {file}");
+    let out = home.run(&["--config", c, "show", "d72", "--filter", "tags,location", "--just-value"]);
+    assert_eq!(text(&out), "db\nprod\nAustin\n");
+    let out = home.run(&["--config", c, "set", "d72", "--untag", "db"]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    let out = home.run(&["--config", c, "show", "d72", "--filter", "tags", "--format", "json"]);
+    assert_eq!(text(&out), "[{\"tags\":[\"prod\"]}]\n");
+    let out = home.run(&["--config", c, "set", "d72"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(err(&out), "error: set needs KEY VALUE pairs, --tag or --untag.\n");
+    let out = home.run(&["--config", c, "set", "d72", "--", "privateKeyLocation", "-----BEGIN OPENSSH PRIVATE KEY-----"]);
+    assert_eq!(out.status.code(), Some(1), "{}", err(&out));
+    assert_eq!(
+        err(&out),
+        "error: privateKeyLocation holds a reference to a key, not the key itself.\n"
+    );
+}
+
+/// D27: a missing key warns and exits 4 after printing everything;
+/// --allow-missing exits 0; exit 1 wins over 4.
+#[test]
+fn missing_key_exits_4_unless_allowed() {
+    let home = Home::new();
+    let c = home.file("read.conf", READ_FIXTURE);
+    let c = c.to_str().unwrap();
+    let out = home.run(&["--config", c, "show", "d72", "plain", "--filter", "Host,Port,proxyjump", "--format", "csv"]);
+    assert_eq!(out.status.code(), Some(4));
+    assert_eq!(text(&out), "Host,Port,proxyjump\nd72,2200,\nplain,2200,\n");
+    assert_eq!(
+        err(&out),
+        "warning: d72 has no 'proxyjump'\nwarning: plain has no 'proxyjump'\n"
+    );
+    let out = home.run(&["--config", c, "show", "d72", "--filter", "proxyjump", "--allow-missing"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(text(&out), "");
+    assert_eq!(err(&out), "");
+    let out = home.run(&["--config", c, "show", "nope", "--filter", "proxyjump"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(err(&out), "error: nope does not exist.\n");
+    let out = home.run(&["--config", c, "list", "--filter", "Host,tags", "--format", "yml"]);
+    assert_eq!(out.status.code(), Some(0), "tags is never missing");
+    assert_eq!(text(&out), "- Host: d72\n  tags: [db]\n- Host: plain\n  tags: []\n");
+}
+
+/// Selection and format edge cases: --json with another --format, show
+/// without a selection, a --where that selects nothing, --section on show.
+#[test]
+fn read_option_errors_and_selection() {
+    let home = Home::new();
+    let c = home.file("read.conf", READ_FIXTURE);
+    let c = c.to_str().unwrap();
+    let out = home.run(&["--config", c, "--json", "list", "--format", "csv"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(err(&out), "error: --json and --format csv conflict.\n");
+    let out = home.run(&["--config", c, "--json", "list", "--format", "json"]);
+    assert_eq!(out.status.code(), Some(0), "the same format twice is fine");
+    let out = home.run(&["--config", c, "show"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(err(&out), "error: show needs a host name, --where or --section.\n");
+    let out = home.run(&["--config", c, "show", "--where", "tags=nothing"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(text(&out), "");
+    let out = home.run(&["--config", c, "show", "--where", "tags=db"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(text(&out).starts_with("# tags: db\nHost d72\n"));
+    let out = home.run(&["--config", c, "list", "--where", "tags!=db", "--filter", "Host", "--just-value"]);
+    assert_eq!(text(&out), "plain\n");
+    let out = home.run(&["--config", c, "show", "d72", "--section", "nope"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(err(&out), "error: section nope does not exist.\n");
+    let out = home.run(&["--config", c, "search", "10.7", "--format", "csv"]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        format!("Host,hostname,user,port,section,file\nd72,10.7.112.72,travis,2200,,{c}\n")
+    );
+    // `plain` matches through its $USER fallback but sets no User itself, so
+    // the default csv keys report it missing (D27).
+    let out = home.run(&["--config", c, "search", "travis", "--format", "csv"]);
+    assert_eq!(out.status.code(), Some(4));
+    assert_eq!(err(&out), "warning: plain has no 'user'\n");
+    let out = home.run(&["--config", c, "list", "--where", "nonsense"]);
+    assert_eq!(out.status.code(), Some(2));
+    let out = home.run(&["--config", c, "list", "--format", "xml"]);
+    assert_eq!(out.status.code(), Some(2), "clap rejects an unknown format name");
+}
+
 #[test]
 fn four_move_forms_write_identical_files() {
     let forms: [&[&str]; 4] = [

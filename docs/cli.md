@@ -294,7 +294,7 @@ rustorm search <PATTERN>  [-s NAME] [--where KEY=VALUE]... [--filter KEYS] [--fo
 
 `-s, --section NAME` is `--where section=NAME` with one difference kept from `list`: a section that exists in no file is an error, exit 1. A `--where` that selects no host prints nothing: `list` exits 0, `show` and `search` exit 1. `show` needs a name unless `--where` or `--section` is given; with both, the named hosts are kept only when they also match.
 
-**`--filter KEYS`** picks the keys to print, comma-separated, in the order given. The output holds exactly these keys and nothing else: leave `Host` out and no name is printed. Without `--filter` the command prints its usual output in the chosen format (`list` and `search` print the `list` rows, `show` the entries).
+**`--filter KEYS`** picks the keys to print, comma-separated, in the order given. The output holds exactly these keys and nothing else: leave `Host` out and no name is printed. Without `--filter`, `txt` and `json` print the command's usual output (`list` and `search` the rows, `show` the entries); `csv` and `yaml` use the keys `Host,hostname,user,port,section,file`.
 
 **`--format FMT`** is `txt` (the default), `json`, `csv` or `yaml`; `yml` is an alias of `yaml`. `--json` is `--format json`; naming both with different formats is a usage error, exit 2.
 
@@ -347,32 +347,36 @@ $ rustorm list --where tags=prod --where location~Austin --filter Host,tags --fo
   tags: [prod, austin, db]
 
 $ rustorm list --filter Host,section,file --format yaml
-- Host: D72
-  section: df austin
-  file: /home/me/.ssh/config.d/df-austin
 - Host: github
   section: other
   file: /home/me/.ssh/config
+- Host: D72
+  section: df austin
+  file: /home/me/.ssh/config.d/df-austin
 
 $ rustorm search keepassxc --filter Host,privateKeyLocation --format yaml
 - Host: buildbox
   privateKeyLocation: keepassxc
 
-$ rustorm show D72 --filter Host,proxyjump --format json; echo $?
+$ rustorm show D72 --filter Host,proxyjump --format json
 warning: D72 has no 'proxyjump'
 [{"Host":"D72","proxyjump":null}]
+$ echo $?
 4
 
-$ rustorm show D72 --filter Host,proxyjump --format json --allow-missing; echo $?
+$ rustorm show D72 --filter Host,proxyjump --format json --allow-missing
 [{"Host":"D72","proxyjump":null}]
+$ echo $?
 0
 
 $ rustorm show --where tags=db,cache --filter hostname --just-value
 10.7.112.72
+10.0.4.12
 10.7.112.80
 
-$ rustorm list --json --format csv; echo $?
+$ rustorm list --json --format csv
 error: --json and --format csv conflict.
+$ echo $?
 2
 ```
 
@@ -493,7 +497,7 @@ vps updated.
 $ rustorm set vps note "Primary build box" location "Austin DC, rack 4" --tag prod --tag db
 vps updated.
 
-$ rustorm set vps privateKeyLocation "-----BEGIN OPENSSH PRIVATE KEY-----"
+$ rustorm set vps -- privateKeyLocation "-----BEGIN OPENSSH PRIVATE KEY-----"
 error: privateKeyLocation holds a reference to a key, not the key itself.
 
 $ rustorm set -r 'nomatch-.*' User x
