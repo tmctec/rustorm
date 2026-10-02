@@ -5,7 +5,7 @@
 
 use std::cmp::Ordering;
 
-use rustorm_core::{Config, Env, Workspace};
+use rustorm_core::{Config, Env, HostMeta, Workspace};
 
 /// A column of the host table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -110,6 +110,8 @@ pub struct HostRow {
     pub jump: Option<String>,
     /// First `IdentityFile`.
     pub identity: Option<String>,
+    /// The host's metadata comments (docs/cli.md, Host metadata).
+    pub meta: HostMeta,
 }
 
 impl HostRow {
@@ -218,6 +220,7 @@ fn host_row(config: &Config, r: rustorm_core::ListRow, file: usize, file_name: S
         port_effective: r.port,
         proxy: r.proxy_command,
         jump: r.proxy_jump,
+        meta: r.meta,
     }
 }
 
@@ -315,5 +318,6 @@ impl Filters {
             || Column::ALL
                 .iter()
                 .any(|c| contains(&row.display(*c), global))
+            || row.meta.lines().iter().any(|l| contains(l, global))
     }
 }

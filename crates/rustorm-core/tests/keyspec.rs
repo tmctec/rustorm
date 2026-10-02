@@ -19,7 +19,11 @@ fn ks_1_every_known_key_has_a_spec() {
             assert_eq!(spec.key, *k);
         }
     }
-    assert_eq!(key_specs().len(), KNOWN_KEYS.len() - 3);
+    assert_eq!(
+        key_specs().len(),
+        KNOWN_KEYS.len() - 3 + rustorm_core::MetaKey::ALL.len(),
+        "every settable ssh keyword plus the five metadata keys"
+    );
     for g in KeyGroup::ALL {
         assert!(
             key_specs().iter().any(|s| s.group == g),
@@ -32,7 +36,12 @@ fn ks_1_every_known_key_has_a_spec() {
         .filter(|s| s.multi)
         .map(|s| s.key)
         .collect();
-    assert_eq!(multi.len(), rustorm_core::MULTI_VALUED_KEYS.len());
+    assert_eq!(
+        multi.len(),
+        rustorm_core::MULTI_VALUED_KEYS.len() + 1,
+        "the multi-valued ssh keys plus the metadata key note: {multi:?}"
+    );
+    assert!(multi.contains(&"note"));
 }
 
 /// ks-2: fixed choices match ssh_config(5).

@@ -1404,11 +1404,20 @@ impl App {
         let blocked = self.editor_dirty();
         let multi = self.is_multi();
         let section_names = self.section_names();
+        let meta = self
+            .selected
+            .as_ref()
+            .and_then(|s| self.rows.iter().find(|r| &r.name == s))
+            .map(|r| r.meta.clone())
+            .unwrap_or_default();
         let Some(form) = self.form.as_mut() else {
             return;
         };
         let adding = form.mode == FormMode::Add;
         ui.heading(if adding { "Add host" } else { "Edit host" });
+        if !adding && !meta.is_empty() {
+            meta_summary(ui, &meta);
+        }
         ui.add_space(6.0);
         egui::Grid::new("form")
             .num_columns(2)
@@ -1515,6 +1524,7 @@ impl App {
         ui.separator();
         let mut save = false;
         let mut reset = false;
+        let known_tags = self.known_tags();
         egui::CollapsingHeader::new("All settings")
             .id_salt("all-settings")
             .show(ui, |ui| {
@@ -1554,6 +1564,7 @@ impl App {
                                             group,
                                             &shown,
                                             &mut view.focus,
+                                            &known_tags,
                                             weak,
                                             err,
                                         );
@@ -1589,6 +1600,21 @@ impl App {
                 self.goto_line = pending;
             }
         }
+    }
+
+    /// Every tag any host carries, once, sorted ignoring case; the tags
+    /// row offers them.
+    pub fn known_tags(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for r in &self.rows {
+            for t in &r.meta.tags {
+                if !out.iter().any(|o| o.eq_ignore_ascii_case(t)) {
+                    out.push(t.clone());
+                }
+            }
+        }
+        out.sort_by_key(|t| t.to_lowercase());
+        out
     }
 
     /// Every section name once, in load order, for the section buttons.
@@ -2062,12 +2088,75 @@ fn buffer_host_line(text: &str, name: &str) -> Option<usize> {
 
 /// One group of the All settings section: a row per value, the control
 /// fitting the keyword's type, the problem with a value under it.
+/// The selected host's metadata under the detail panel's heading: location,
+/// tags as chips, note lines (docs/cli.md, Host metadata).
+fn meta_summary(ui: &mut Ui, meta: &rustorm_core::HostMeta) {
+    let weak = ui.visuals().weak_text_color();
+    ui.horizontal_wrapped(|ui| {
+        if let Some(l) = &meta.location {
+            ui.label(RichText::new("📍").color(weak));
+            ui.label(l);
+        }
+        for t in &meta.tags {
+            ui.label(
+                RichText::new(t)
+                    .small()
+                    .background_color(ui.visuals().faint_bg_color),
+            );
+        }
+    });
+    for n in &meta.note {
+        ui.label(RichText::new(n).color(weak));
+    }
+}
+
+/// The tags row: one chip per tag with a remove button, a menu of the tags
+/// other hosts use, and a field to type new ones (comma-separated).
+fn tags_row(ui: &mut Ui, value: &mut String, known: &[String]) {
+    let mut tags = rustorm_core::split_tags(value);
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        let mut remove = None;
+        for (i, t) in tags.iter().enumerate() {
+            if ui.small_button(format!("{t} ×")).on_hover_text("Remove tag").clicked() {
+                remove = Some(i);
+            }
+        }
+        if let Some(i) = remove {
+            tags.remove(i);
+            changed = true;
+        }
+        let unused: Vec<&String> = known
+            .iter()
+            .filter(|k| !tags.iter().any(|t| t.eq_ignore_ascii_case(k)))
+            .collect();
+        if !unused.is_empty() {
+            ui.menu_button("▾", |ui| {
+                for k in unused {
+                    if ui.button(k).clicked() {
+                        tags.push(k.clone());
+                        changed = true;
+                        ui.close();
+                    }
+                }
+            });
+        }
+    });
+    if changed {
+        *value = tags.join(", ");
+    }
+}
+
+// One row of controls per keyword of the group; the arguments are the
+// view state the rows share, which a struct would only rename.
+#[allow(clippy::too_many_arguments)]
 fn settings_group(
     ui: &mut Ui,
     draft: &mut SettingsDraft,
     group: KeyGroup,
     shown: &[usize],
     focus: &mut Option<usize>,
+    known_tags: &[String],
     weak: Color32,
     err: Color32,
 ) {
@@ -2089,7 +2178,21 @@ fn settings_group(
                 };
                 ui.label(label);
                 let before = row.value.clone();
-                if !row.typed() {
+                if key == "tags" {
+                    ui.vertical(|ui| {
+                        tags_row(ui, &mut row.value, known_tags);
+                        let resp = ui.add(
+                            TextEdit::singleline(&mut row.value)
+                                .hint_text(RichText::new("prod, austin, db").color(weak))
+                                .desired_width(220.0),
+                        );
+                        set_label(ui, resp.id, key);
+                        if *focus == Some(i) {
+                            focus_all(ui, &resp, row.value.chars().count());
+                            *focus = None;
+                        }
+                    });
+                } else if !row.typed() {
                     let shown = if row.value.is_empty() {
                         match &row.inherited {
                             Some(v) => format!("— ({v} from Host *)"),

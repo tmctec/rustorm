@@ -625,6 +625,21 @@ impl App {
 
     // ----- state helpers -----
 
+    /// Every tag any host carries, once, sorted ignoring case; the settings
+    /// form shows them under the tags row.
+    pub fn known_tags(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for r in &self.rows {
+            for t in &r.meta.tags {
+                if !out.iter().any(|o| o.eq_ignore_ascii_case(t)) {
+                    out.push(t.clone());
+                }
+            }
+        }
+        out.sort_by_key(|t| t.to_lowercase());
+        out
+    }
+
     fn selected_row(&self) -> Option<&Row> {
         let i = self.table.selected()?;
         self.visible.get(i).map(|r| &self.rows[*r])
@@ -1893,6 +1908,10 @@ impl App {
                     None => {
                         if let Some(r) = self.selected_row() {
                             spans.push(Span::raw(r.target.clone()));
+                            let meta = r.meta_summary();
+                            if !meta.is_empty() {
+                                spans.push(Span::styled(format!("   {meta}"), theme.muted()));
+                            }
                         }
                     }
                 }
@@ -2061,8 +2080,15 @@ impl App {
             .take(room)
             .map(|(l, _)| l)
             .collect();
+        let known = self.known_tags();
         shown.push(match (&form.error, form.focus) {
             (Some(e), Some(_)) => Line::from(Span::styled(format!("Error: {e}"), theme.error())),
+            (None, Some(i)) if form.draft.rows[i].spec.key == "tags" && !known.is_empty() => {
+                Line::from(Span::styled(
+                    format!("tags in use: {}", known.join(", ")),
+                    theme.muted(),
+                ))
+            }
             _ => Line::from(""),
         });
         shown.push(Line::from(Span::styled(
