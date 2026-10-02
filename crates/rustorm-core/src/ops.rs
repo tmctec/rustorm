@@ -77,9 +77,34 @@ pub(crate) fn check_settable(key: &str) -> Result<()> {
     Ok(())
 }
 
+/// Checks a `KEY VALUE` pair before it is written: the key can be set on a
+/// host, and a metadata value fits its key (docs/cli.md, Host metadata).
+pub(crate) fn check_pair(key: &str, value: &str) -> Result<()> {
+    check_settable(key)?;
+    if let Some(m) = crate::meta::MetaKey::parse(key) {
+        crate::meta::validate_meta(m, value).map_err(|reason| Error::InvalidSetting {
+            key: m.name().to_string(),
+            reason,
+        })?;
+    }
+    Ok(())
+}
+
 pub(crate) fn check_settings(changes: &[SettingChange]) -> Result<()> {
     for c in changes {
         check_settable(&c.key)?;
+        if let Some(m) = crate::meta::MetaKey::parse(&c.key) {
+            if c.values.len() > 1 && !m.is_list() {
+                return Err(Error::InvalidSetting {
+                    key: m.name().to_string(),
+                    reason: "takes one value".into(),
+                });
+            }
+            for v in &c.values {
+                check_pair(&c.key, v)?;
+            }
+            continue;
+        }
         let key = crate::canonical_key(&c.key);
         if c.values.len() > 1 && !keys::is_multi_valued(&key) {
             return Err(Error::InvalidSetting {
@@ -93,6 +118,17 @@ pub(crate) fn check_settings(changes: &[SettingChange]) -> Result<()> {
                 reason,
             })?;
         }
+    }
+    Ok(())
+}
+
+/// Checks `set`'s pairs and `--tag` values before any host is touched.
+pub(crate) fn check_set_args(pairs: &[(String, String)], add_tags: &[String]) -> Result<()> {
+    for (k, v) in pairs {
+        check_pair(k, v)?;
+    }
+    for t in add_tags {
+        check_pair("tags", t)?;
     }
     Ok(())
 }
@@ -116,7 +152,7 @@ pub(crate) fn apply_settings(block: &mut HostBlock, changes: &[SettingChange]) {
 
 pub(crate) fn apply_pairs(block: &mut HostBlock, pairs: &[(String, String)], append: bool) {
     for (k, v) in pairs {
-        if append && keys::is_multi_valued(k) {
+        if append && (keys::is_multi_valued(k) || crate::meta::accumulates(k)) {
             block.append(k, v);
         } else {
             block.set(k, v);
@@ -262,6 +298,8 @@ pub struct ShownHost {
     pub section: Option<String>,
     /// The entry verbatim: comments directly above, `Host` line and body.
     pub text: String,
+    /// The host's metadata (docs/cli.md, Host metadata).
+    pub meta: crate::meta::HostMeta,
 }
 
 /// One row of `list`, with user and port resolved.
@@ -291,6 +329,8 @@ pub struct ListRow {
     pub proxy_command: Option<String>,
     /// `ProxyJump`, when set.
     pub proxy_jump: Option<String>,
+    /// The host's metadata (docs/cli.md, Host metadata).
+    pub meta: crate::meta::HostMeta,
 }
 
 pub(crate) fn serialize_options<S: serde::Serializer>(
@@ -496,10 +536,17 @@ fn expand_identity(value: &str, home: Option<&std::path::Path>) -> Option<PathBu
     Some(base.join(rest))
 }
 
-/// The copy `clone` makes of `source`: its body under `Host NEW-NAME`,
+/// The copy `clone` makes of `source`: its metadata lines and body under
+/// `Host NEW-NAME` (other leading comments stay with the source),
 /// `HostName` rewritten unless `keep_hostname`, then the overrides.
 pub(crate) fn clone_block(source: &HostBlock, spec: &CloneSpec) -> HostBlock {
     let mut block = HostBlock::new(std::slice::from_ref(&spec.new_name));
+    block.leading = source
+        .leading
+        .iter()
+        .filter(|l| crate::meta::parse_meta_line(l.text()).is_some())
+        .cloned()
+        .collect();
     block.body = source.body.clone();
     if !spec.keep_hostname {
         if let Some(hn) = block.get("HostName") {
@@ -600,8 +647,8 @@ impl Config {
             return Err(Error::HostExists(spec.name.clone()));
         }
         let uri = ConnectionUri::parse(&spec.uri)?;
-        for (k, _) in &spec.options {
-            check_settable(k)?;
+        for (k, v) in &spec.options {
+            check_pair(k, v)?;
         }
         let (user, port) = Config::resolve_user_port(&uri, env, defaults);
         let mut block = HostBlock::new(std::slice::from_ref(&spec.name));
@@ -635,8 +682,8 @@ impl Config {
             .find_host(&spec.name)
             .ok_or_else(|| Error::EditTargetMissing(spec.name.clone()))?;
         let uri = ConnectionUri::parse(&spec.uri)?;
-        for (k, _) in &spec.options {
-            check_settable(k)?;
+        for (k, v) in &spec.options {
+            check_pair(k, v)?;
         }
         let (user, port) = Config::resolve_user_port(&uri, env, defaults);
         let block = self.host_mut(loc);
@@ -693,14 +740,28 @@ impl Config {
         pairs: &[(String, String)],
         append: bool,
     ) -> Result<Vec<String>> {
-        for (k, _) in pairs {
-            check_settable(k)?;
-        }
+        self.set_with_tags(selector, pairs, append, &[], &[])
+    }
+
+    /// [`Config::set`] plus `--tag` and `--untag`: `add_tags` are added to
+    /// each host's `# tags:` line and `remove_tags` taken off it, after the
+    /// pairs.
+    pub fn set_with_tags(
+        &mut self,
+        selector: &HostSelector,
+        pairs: &[(String, String)],
+        append: bool,
+        add_tags: &[String],
+        remove_tags: &[String],
+    ) -> Result<Vec<String>> {
+        check_set_args(pairs, add_tags)?;
         let locs = self.select(selector)?;
         let mut names = Vec::new();
         for loc in locs {
             let block = self.host_mut(loc);
             apply_pairs(block, pairs, append);
+            block.add_tags(add_tags);
+            block.remove_tags(remove_tags);
             names.push(block.primary());
         }
         self.finish();
@@ -752,8 +813,8 @@ impl Config {
         if self.find_host(&spec.new_name).is_some() {
             return Err(Error::TargetExists(spec.new_name.clone()));
         }
-        for (k, _) in &spec.overrides {
-            check_settable(k)?;
+        for (k, v) in &spec.overrides {
+            check_pair(k, v)?;
         }
         let block = clone_block(self.host(loc), spec);
         self.ensure_trailing_newline();
@@ -901,6 +962,7 @@ impl Config {
                         options,
                         proxy_command: h.get("ProxyCommand"),
                         proxy_jump: h.get("ProxyJump"),
+                        meta: h.meta(),
                     }
                 })
                 .collect();
@@ -937,6 +999,7 @@ impl Config {
                     name: h.primary(),
                     section: self.section_name(loc).map(str::to_string),
                     text: h.text(),
+                    meta: h.meta(),
                 })
             })
             .collect()
@@ -947,9 +1010,9 @@ impl Config {
         self.render()
     }
 
-    /// `search`: the `list` rows of every host whose name, alias, key, value
-    /// or `name -> user@hostname:port` line matches `pattern` (a regular
-    /// expression, or literal text when `fixed`).
+    /// `search`: the `list` rows of every host whose name, alias, key, value,
+    /// metadata line or `name -> user@hostname:port` line matches `pattern`
+    /// (a regular expression, or literal text when `fixed`).
     pub fn search(&self, pattern: &str, fixed: bool, env: &Env) -> Result<Vec<ListRow>> {
         let matcher = Matcher::new(pattern, fixed)?;
         Ok(self.search_rows(&matcher, self.list(env)))
@@ -970,6 +1033,7 @@ impl Config {
                             .into_iter()
                             .flat_map(|d| [d.key, d.value]),
                     )
+                    .chain(row.meta.lines())
                     .any(|s| matcher.is_match(&s))
             })
             .collect()

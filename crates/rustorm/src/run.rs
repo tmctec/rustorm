@@ -5,14 +5,133 @@ use std::io::{BufRead, IsTerminal};
 use std::path::PathBuf;
 
 use rustorm_core::{
-    combine as core_combine, pair_up, parse_option, resolve_config_path, write_text, AddSpec,
-    Change, CloneSpec, CombineInput, CombineReport, ConfigFile, EditSpec, Env, Error, HostSelector,
-    IncludeMatch, IncludeStatus, ListRow, OnConflict, Result, UserConfig, Workspace, WriteOptions,
+    combine as core_combine, missing, pair_up, parse_filter, parse_option, project, render,
+    resolve_config_path, selected, write_text, AddSpec, Change, CloneSpec, CombineInput,
+    CombineReport, ConfigFile, EditSpec, Env, Error, Format, HostSelector, IncludeMatch,
+    IncludeStatus, ListRow, OnConflict, Projected, Result, UserConfig, Where, Workspace,
+    WorkspaceRow, WriteOptions,
 };
 use serde::Serialize;
 
-use crate::cli::{Cli, Cmd};
+use crate::cli::{Cli, Cmd, FormatName, ReadArgs};
 use crate::out::{self, paint, Style};
+
+/// The keys `csv` and `yaml` print without `--filter` (docs/cli.md, Reading
+/// output).
+const DEFAULT_KEYS: &[&str] = &["Host", "hostname", "user", "port", "section", "file"];
+
+/// The parsed read options of `list`, `show` and `search`.
+struct ReadOpts {
+    wheres: Vec<Where>,
+    filter: Option<Vec<String>>,
+    format: Format,
+    just_value: bool,
+    allow_missing: bool,
+}
+
+impl ReadOpts {
+    fn parse(ctx: &Ctx, args: &ReadArgs) -> Result<ReadOpts> {
+        let named = args.format.map(|f| match f {
+            FormatName::Txt => Format::Txt,
+            FormatName::Json => Format::Json,
+            FormatName::Csv => Format::Csv,
+            FormatName::Yaml | FormatName::Yml => Format::Yaml,
+        });
+        let format = match (ctx.json, named) {
+            (true, Some(f)) if f != Format::Json => {
+                return Err(Error::Usage(format!(
+                    "--json and --format {} conflict.",
+                    f.name()
+                )));
+            }
+            (true, _) => Format::Json,
+            (false, Some(f)) => f,
+            (false, None) => Format::Txt,
+        };
+        let wheres = args
+            .where_
+            .iter()
+            .map(|w| Where::parse(w))
+            .collect::<Result<Vec<_>>>()?;
+        let filter = match &args.filter {
+            Some(f) => Some(parse_filter(f)?),
+            None => None,
+        };
+        Ok(ReadOpts {
+            wheres,
+            filter,
+            format,
+            just_value: args.just_value,
+            allow_missing: args.allow_missing,
+        })
+    }
+
+    /// The keys to project: `--filter`, else the default set for `csv`,
+    /// `yaml` and `--just-value`; `None` keeps the command's usual output.
+    fn keys(&self) -> Option<Vec<String>> {
+        match (&self.filter, self.format, self.just_value) {
+            (Some(f), _, _) => Some(f.clone()),
+            (None, Format::Csv | Format::Yaml, _) | (None, _, true) => {
+                Some(DEFAULT_KEYS.iter().map(|k| k.to_string()).collect())
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Keeps the rows `--section` and `--where` select.
+fn keep_rows(
+    ctx: &Ctx,
+    ws: &Workspace,
+    mut rows: Vec<WorkspaceRow>,
+    opts: &ReadOpts,
+) -> Result<Vec<WorkspaceRow>> {
+    if let Some(wanted) = &ctx.section {
+        // Every file holding the section keeps its rows (docs/cli.md list).
+        let names: Vec<Option<String>> = ws
+            .files
+            .iter()
+            .map(|f| {
+                f.config
+                    .find_section(wanted)
+                    .map(|idx| f.config.sections[idx].name().to_string())
+            })
+            .collect();
+        if names.iter().all(Option::is_none) {
+            return Err(Error::SectionNotFound(wanted.clone()));
+        }
+        rows.retain(|r| {
+            names[r.file].is_some() && r.row.section.as_deref() == names[r.file].as_deref()
+        });
+    }
+    if !opts.wheres.is_empty() {
+        rows.retain(|r| {
+            ws.view_of(r.file, &r.row.name)
+                .is_some_and(|v| selected(&opts.wheres, &v))
+        });
+    }
+    Ok(rows)
+}
+
+/// Prints the projection of `rows` over `keys`. Returns 4 when a key is
+/// missing on a printed host and `--allow-missing` is off (D27), else 0.
+fn print_projection(ctx: &Ctx, ws: &Workspace, rows: &[WorkspaceRow], keys: &[String], opts: &ReadOpts) -> i32 {
+    let projected: Vec<Projected> = rows
+        .iter()
+        .filter_map(|r| ws.view_of(r.file, &r.row.name).map(|v| project(&v, keys)))
+        .collect();
+    let miss = missing(&projected);
+    let code = if miss.is_empty() || opts.allow_missing {
+        0
+    } else {
+        for (host, key) in &miss {
+            ctx.warn(&format!("{host} has no '{key}'"));
+        }
+        4
+    };
+    out::stdout(&render(&projected, opts.format, opts.just_value));
+    code
+}
 
 /// Environment variable that makes `delete-all` treat stdin as a terminal.
 /// The examples test uses it to answer the prompt from a pipe.
@@ -146,9 +265,11 @@ pub fn run(cli: &Cli, command: &Cmd, user: &UserConfig, color: bool) -> Result<i
         Cmd::Set {
             regex,
             append,
+            tag,
+            untag,
             name,
             pairs,
-        } => set(&ctx, *regex, *append, name, pairs),
+        } => set(&ctx, *regex, *append, tag, untag, name, pairs),
         Cmd::Unset { regex, name, keys } => unset(&ctx, *regex, name, keys),
         Cmd::Clone {
             keep_hostname,
@@ -159,13 +280,14 @@ pub fn run(cli: &Cli, command: &Cmd, user: &UserConfig, color: bool) -> Result<i
         Cmd::Move { name, new_name } => move_host(&ctx, name, new_name.as_deref()),
         Cmd::Delete { names } => delete(&ctx, names),
         Cmd::DeleteAll { yes } => delete_all(&ctx, *yes),
-        Cmd::List { long, names } => list(&ctx, *long, *names),
-        Cmd::Show { names } => show(&ctx, names),
+        Cmd::List { long, names, read } => list(&ctx, *long, *names, read),
+        Cmd::Show { names, read } => show(&ctx, names, read),
         Cmd::Dump => dump(&ctx),
         Cmd::Search {
             fixed_strings,
             pattern,
-        } => search(&ctx, pattern, *fixed_strings),
+            read,
+        } => search(&ctx, pattern, *fixed_strings, read),
         Cmd::Alias { name, aliases } => alias(&ctx, name, aliases),
         Cmd::Unalias { args } => unalias(&ctx, args),
         Cmd::Sections => sections(&ctx),
@@ -236,10 +358,23 @@ fn selector(regex: bool, name: &str) -> HostSelector {
     }
 }
 
-fn set(ctx: &Ctx, regex: bool, append: bool, name: &str, pairs: &[String]) -> Result<i32> {
+fn set(
+    ctx: &Ctx,
+    regex: bool,
+    append: bool,
+    tag: &[String],
+    untag: &[String],
+    name: &str,
+    pairs: &[String],
+) -> Result<i32> {
+    if pairs.is_empty() && tag.is_empty() && untag.is_empty() {
+        return Err(Error::Usage(
+            "set needs KEY VALUE pairs, --tag or --untag.".to_string(),
+        ));
+    }
     let pairs = pair_up(pairs)?;
     let mut ws = ctx.load()?;
-    let change = ws.set(&selector(regex, name), &pairs, append, ctx.file())?;
+    let change = ws.set_with_tags(&selector(regex, name), &pairs, append, tag, untag, ctx.file())?;
     ctx.finish(&mut ws, change)?;
     Ok(0)
 }
@@ -314,28 +449,14 @@ fn delete_all(ctx: &Ctx, yes: bool) -> Result<i32> {
     Ok(0)
 }
 
-fn list(ctx: &Ctx, long: bool, names_only: bool) -> Result<i32> {
+fn list(ctx: &Ctx, long: bool, names_only: bool, read: &ReadArgs) -> Result<i32> {
+    let opts = ReadOpts::parse(ctx, read)?;
     let ws = ctx.load_read()?;
-    let mut rows = ws.list(&ctx.env);
-    if let Some(wanted) = &ctx.section {
-        // Every file holding the section keeps its rows (docs/cli.md list).
-        let names: Vec<Option<String>> = ws
-            .files
-            .iter()
-            .map(|f| {
-                f.config
-                    .find_section(wanted)
-                    .map(|idx| f.config.sections[idx].name().to_string())
-            })
-            .collect();
-        if names.iter().all(Option::is_none) {
-            return Err(Error::SectionNotFound(wanted.clone()));
-        }
-        rows.retain(|r| {
-            names[r.file].is_some() && r.row.section.as_deref() == names[r.file].as_deref()
-        });
+    let rows = keep_rows(ctx, &ws, ws.list(&ctx.env), &opts)?;
+    if let Some(keys) = opts.keys() {
+        return Ok(print_projection(ctx, &ws, &rows, &keys, &opts));
     }
-    if ctx.json {
+    if opts.format == Format::Json {
         out::line(&to_json(&rows));
         return Ok(0);
     }
@@ -397,15 +518,46 @@ fn list(ctx: &Ctx, long: bool, names_only: bool) -> Result<i32> {
     Ok(0)
 }
 
-fn show(ctx: &Ctx, names: &[String]) -> Result<i32> {
-    let ws = ctx.load_read()?;
-    let (shown, warnings) = ws.show(names)?;
-    for w in &warnings {
-        ctx.warn(w);
+fn show(ctx: &Ctx, names: &[String], read: &ReadArgs) -> Result<i32> {
+    let opts = ReadOpts::parse(ctx, read)?;
+    if names.is_empty() && opts.wheres.is_empty() && ctx.section.is_none() {
+        return Err(Error::Usage(
+            "show needs a host name, --where or --section.".to_string(),
+        ));
     }
-    if ctx.json {
+    let ws = ctx.load_read()?;
+    // The named hosts (first definition in load order, with the duplicate
+    // warnings), or every host when only --where/--section select.
+    let rows: Vec<WorkspaceRow> = if names.is_empty() {
+        ws.list(&ctx.env)
+    } else {
+        let (shown, warnings) = ws.show(names)?;
+        for w in &warnings {
+            ctx.warn(w);
+        }
+        let all = ws.list(&ctx.env);
+        shown
+            .iter()
+            .filter_map(|h| {
+                all.iter()
+                    .find(|r| r.file == h.index && r.row.name == h.name)
+                    .cloned()
+            })
+            .collect()
+    };
+    let rows = keep_rows(ctx, &ws, rows, &opts)?;
+    let code = if rows.is_empty() { 1 } else { 0 };
+    if let Some(keys) = opts.keys() {
+        let missing_code = print_projection(ctx, &ws, &rows, &keys, &opts);
+        return Ok(if code != 0 { code } else { missing_code });
+    }
+    let shown: Vec<_> = rows
+        .iter()
+        .filter_map(|r| ws.shown_at(r.file, &r.row.name))
+        .collect();
+    if opts.format == Format::Json {
         out::line(&to_json(&shown));
-        return Ok(0);
+        return Ok(code);
     }
     let mut text = String::new();
     for h in shown {
@@ -418,7 +570,7 @@ fn show(ctx: &Ctx, names: &[String]) -> Result<i32> {
         text = out::color_dump(&text);
     }
     out::stdout(&text);
-    Ok(0)
+    Ok(code)
 }
 
 #[derive(Serialize)]
@@ -445,11 +597,16 @@ fn dump(ctx: &Ctx) -> Result<i32> {
     Ok(0)
 }
 
-fn search(ctx: &Ctx, pattern: &str, fixed: bool) -> Result<i32> {
+fn search(ctx: &Ctx, pattern: &str, fixed: bool, read: &ReadArgs) -> Result<i32> {
+    let opts = ReadOpts::parse(ctx, read)?;
     let ws = ctx.load_read()?;
-    let rows = ws.search(pattern, fixed, &ctx.env)?;
+    let rows = keep_rows(ctx, &ws, ws.search(pattern, fixed, &ctx.env)?, &opts)?;
     let code = if rows.is_empty() { 1 } else { 0 };
-    if ctx.json {
+    if let Some(keys) = opts.keys() {
+        let missing_code = print_projection(ctx, &ws, &rows, &keys, &opts);
+        return Ok(if code != 0 { code } else { missing_code });
+    }
+    if opts.format == Format::Json {
         out::line(&to_json(&rows));
         return Ok(code);
     }
@@ -472,6 +629,28 @@ fn search(ctx: &Ctx, pattern: &str, fixed: bool) -> Result<i32> {
             ctx.color,
         ));
         text.push('\n');
+        // A match only in the metadata prints the matching line under the
+        // host, so the output names the field (docs/cli.md search).
+        let elsewhere = matcher.is_match(&r.row.line())
+            || r.row.aliases.iter().any(|a| matcher.is_match(a))
+            || r
+                .row
+                .options
+                .iter()
+                .any(|(k, v)| matcher.is_match(k) || matcher.is_match(v));
+        if !elsewhere {
+            for line in r.row.meta.lines() {
+                if matcher.is_match(&line) {
+                    text.push_str("    ");
+                    text.push_str(&out::highlight(
+                        &line,
+                        &matcher.find_ranges(&line),
+                        ctx.color,
+                    ));
+                    text.push('\n');
+                }
+            }
+        }
     }
     out::stdout(&text);
     Ok(code)

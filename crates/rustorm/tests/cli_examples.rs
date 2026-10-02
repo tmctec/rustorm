@@ -25,8 +25,15 @@ fn plan(heading: &str) -> Option<Vec<Step>> {
     let steps: Vec<Step> = match heading {
         "add" => vec![(f("empty"), 0), (None, 0), (None, 0), (None, 1)],
         "edit" => vec![(f("edit"), 0), (None, 1)],
-        "set" => vec![(f("set"), 0), (None, 0), (None, 0), (None, 1)],
-        "unset" => vec![(f("unset"), 0)],
+        "set" => vec![
+            (f("set"), 0),
+            (None, 0),
+            (None, 0),
+            (None, 0),
+            (None, 1),
+            (None, 1),
+        ],
+        "unset" => vec![(f("unset"), 0), (None, 0)],
         "clone" => vec![(f("clone"), 0), (None, 0), (None, 0), (None, 0), (None, 1)],
         "move" => vec![(f("move"), 0), (None, 0), (None, 0), (None, 2)],
         "delete" => vec![(f("delete"), 0), (None, 1)],
@@ -41,7 +48,30 @@ fn plan(heading: &str) -> Option<Vec<Step>> {
         ],
         "show" => vec![(f("show"), 0), (None, 1)],
         "dump" => vec![(f("dump"), 0), (None, 0)],
-        "search" => vec![(f("search"), 0), (None, 0), (None, 1)],
+        "search" => vec![(f("search"), 0), (None, 0), (None, 0), (None, 1)],
+        // Reading output (a `##` section): a sectioned file with metadata,
+        // then the Include workspace (config.d/df-austin seeded by
+        // [`extra_files`]) for the `file` example, then the sectioned file
+        // again. `echo $?` lines are steps too.
+        "Reading output" => vec![
+            (f("read"), 0),
+            (None, 0),
+            (None, 0),
+            (None, 0),
+            (None, 0),
+            (None, 0),
+            (None, 0),
+            (None, 0),
+            (f("read-root"), 0),
+            (f("read"), 0),
+            (None, 4),
+            (None, 0),
+            (None, 0),
+            (None, 0),
+            (None, 0),
+            (None, 2),
+            (None, 0),
+        ],
         "alias" => vec![(f("alias"), 0), (None, 0)],
         "unalias" => vec![(f("unalias"), 0), (None, 0)],
         "sections" => vec![(f("sections"), 0)],
@@ -94,6 +124,7 @@ fn extra_files(heading: &str) -> Vec<(&'static str, &'static str)> {
             ("includes-ranch", "config.d/ranch"),
             ("includes-lab", "ranch.d/lab"),
         ],
+        "Reading output" => vec![("read-df-austin", "config.d/df-austin")],
         _ => Vec::new(),
     }
 }
@@ -109,14 +140,14 @@ struct Block {
 }
 
 /// Every fenced block that follows a `**Examples**` line, with the `###`
-/// heading it sits under.
+/// (or, outside the command sections, `##`) heading it sits under.
 fn blocks() -> Vec<Block> {
     let mut out = Vec::new();
     let mut heading = String::new();
     let mut want_block = false;
     let mut lines = DOC.lines();
     while let Some(line) = lines.next() {
-        if let Some(h) = line.strip_prefix("### ") {
+        if let Some(h) = line.strip_prefix("### ").or_else(|| line.strip_prefix("## ")) {
             heading = h.trim().to_string();
             want_block = false;
         } else if line.trim() == "**Examples**" {
@@ -452,8 +483,8 @@ fn every_cli_md_example_matches() {
     );
     assert_eq!(
         blocks.len(),
-        23,
-        "docs/cli.md has one Examples block per command"
+        24,
+        "docs/cli.md has one Examples block per command, plus Reading output"
     );
     assert!(
         failures.is_empty(),

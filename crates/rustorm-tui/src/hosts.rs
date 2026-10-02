@@ -3,7 +3,7 @@
 
 use std::cmp::Ordering;
 
-use rustorm_core::{Config, Env, Workspace};
+use rustorm_core::{Config, Env, HostMeta, Workspace};
 
 /// A host table column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,9 +130,27 @@ pub struct Row {
     pub file: Option<String>,
     /// Index of the file holding the host in `Workspace::files`.
     pub file_index: usize,
+    /// The host's metadata comments (docs/cli.md, Host metadata).
+    pub meta: HostMeta,
 }
 
 impl Row {
+    /// The metadata the status line shows for the selected host:
+    /// `location · tag, tag · first note line`, or empty.
+    pub fn meta_summary(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(l) = &self.meta.location {
+            parts.push(l.clone());
+        }
+        if !self.meta.tags.is_empty() {
+            parts.push(self.meta.tags.join(", "));
+        }
+        if let Some(n) = self.meta.note.first() {
+            parts.push(n.clone());
+        }
+        parts.join(" · ")
+    }
+
     /// The value in `column`, `None` when missing.
     pub fn get(&self, column: Column) -> Option<&str> {
         match column {
@@ -167,6 +185,7 @@ pub fn rows(config: &Config, env: &Env) -> Vec<Row> {
                 jump: r.proxy_jump,
                 file: None,
                 file_index: 0,
+                meta: r.meta,
             }
         })
         .collect()
@@ -196,6 +215,7 @@ pub fn workspace_rows(ws: &Workspace, env: &Env) -> Vec<Row> {
                 jump: r.proxy_jump,
                 file: Some(ws.file_name(w.file)),
                 file_index: w.file,
+                meta: r.meta,
             }
         })
         .collect()
@@ -261,7 +281,8 @@ impl Filters {
         self.global.is_empty() && self.columns.iter().all(String::is_empty)
     }
 
-    /// True when `row` passes every non-empty filter.
+    /// True when `row` passes every non-empty filter. The global filter
+    /// also matches the host's metadata (note, location, tags).
     pub fn matches(&self, row: &Row) -> bool {
         for c in Column::MULTI {
             let f = self.get(c);
@@ -273,6 +294,11 @@ impl Filters {
             || Column::MULTI
                 .iter()
                 .any(|c| row.get(*c).is_some_and(|v| contains_ci(v, &self.global)))
+            || row
+                .meta
+                .lines()
+                .iter()
+                .any(|l| contains_ci(l, &self.global))
     }
 
     /// `section~bob user~deploy any~x`, or empty.

@@ -1,5 +1,16 @@
 # Releases
 
+## 2026-10-02 — Notes, locations and tags for your hosts, and output you can script
+
+**New**
+- Give a host a note, a location, a pointer to where its key lives, and tags. They live as comments right above the host in your config, so ssh ignores them and any editor shows them: `rustorm set buildbox location "Austin DC, rack 4" --tag prod --tag db`. Search finds hosts by them, the terminal UI shows them in its status line, the desktop app shows them in the host panel, and both edit them in a Notes & location group of the settings form, where tags are chips you can add from the ones you already use.
+- Ask for exactly what you want to read: `rustorm show D72 --filter hostname --just-value` prints one address; `--format csv`, `json` or `yaml` turns `show`, `list` and `search` into tables your scripts can read; `--where tags=prod` or `--where location~Austin` picks the hosts. Leave out `Host` and you get values only. A setting a host doesn't have prints empty and the command exits 4, so a script notices; `--allow-missing` makes that fine.
+- In the config editor, typing `# lo` and pressing Space gives you `# location: ` ready for the value.
+
+**Improved**
+- Searching for text found only in a host's note or location prints that line under the host, so you see why it matched.
+- `--json` output now includes each host's metadata under `meta`.
+
 ## 2026-09-29 — Settings that fit on screen, and an editor that finishes your words
 
 **New**

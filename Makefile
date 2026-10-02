@@ -64,8 +64,14 @@ test-unit:  ## Run rustorm-core's library tests only (fast)
 	@./makehelp.sh test -p rustorm-core --lib
 
 .PHONY: test-core
-test-core:  ## Run every rustorm-core test (model, ops, keyspec, combine, include, workspace, io, lexer)
+test-core:  ## Run every rustorm-core test (model, ops, keyspec, meta, projection, combine, include, workspace, io, lexer)
 	@./makehelp.sh test -p rustorm-core
+
+.PHONY: test-meta
+test-meta:  ## Run the host-metadata and reading-output suites across core, TUI and GUI (meta-*, read-*, mt-*, mg-*)
+	@./makehelp.sh test -p rustorm-core --test meta --test projection
+	@./makehelp.sh test -p rustorm-tui --test meta
+	@./makehelp.sh test -p rustorm-gui --test meta
 
 .PHONY: test-cli
 test-cli:  ## Run the rustorm CLI tests, including every docs/cli.md example
@@ -82,11 +88,15 @@ test-gui:  ## Run the rustorm-gui kittest suite
 GUI_WALKTHROUGH ?= target/gui-walkthrough.txt
 
 .PHONY: test-parity
-test-parity:  ## Run the same 13 operations in the TUI and the GUI and compare the files they write
+test-parity:  ## Run the same 15 operations in the TUI and the GUI and compare the files they write
 	@./makehelp.sh test -p rustorm-parity
 
+.PHONY: fixtures-read
+fixtures-read: build  ## Regenerate the docs/cli.md Reading output fixtures with the built rustorm binary
+	@./scripts/make-read-fixtures.sh
+
 .PHONY: test-gui-walkthrough
-test-gui-walkthrough:  ## Drive the GUI follow, settings (filled/all, Add setting) and editor completion flows; write what they show to GUI_WALKTHROUGH
+test-gui-walkthrough:  ## Drive the GUI follow, settings (filled/all, Add setting, Notes & location) and editor completion flows; write what they show to GUI_WALKTHROUGH
 	@RUSTORM_GUI_EVIDENCE=$(abspath $(GUI_WALKTHROUGH)) ./makehelp.sh test -p rustorm-gui --test settings gui_walkthrough -- --ignored
 	@echo "walkthrough written to $(GUI_WALKTHROUGH)"
 

@@ -28,7 +28,7 @@ use crate::io::{absolute_path, display_path, ConfigFile, WriteOptions};
 use crate::keyspec::SettingChange;
 use crate::model::{HostBlock, HostLocation};
 use crate::ops::{
-    apply_pairs, check_settable, clone_block, serialize_options, validate_name, AddSpec,
+    apply_pairs, check_pair, check_set_args, clone_block, serialize_options, validate_name, AddSpec,
     CheckReport, CloneSpec, EditSpec, Env, HostSelector, ListRow, Matcher, Moved, Placed, Problem,
     ProblemKind, SectionAdded, SectionRename, SectionSummary,
 };
@@ -101,7 +101,7 @@ impl Serialize for WorkspaceRow {
             }
         }
         let r = &self.row;
-        let mut map = s.serialize_map(Some(8))?;
+        let mut map = s.serialize_map(Some(9))?;
         map.serialize_entry("name", &r.name)?;
         map.serialize_entry("file", &self.path)?;
         map.serialize_entry("section", &r.section)?;
@@ -110,6 +110,7 @@ impl Serialize for WorkspaceRow {
         map.serialize_entry("user", &r.user)?;
         map.serialize_entry("port", &r.port)?;
         map.serialize_entry("options", &Options(&r.options))?;
+        map.serialize_entry("meta", &r.meta)?;
         map.end()
     }
 }
@@ -152,6 +153,8 @@ pub struct WorkspaceShown {
     pub section: Option<String>,
     /// The entry verbatim.
     pub text: String,
+    /// The host's metadata (docs/cli.md, Host metadata).
+    pub meta: crate::meta::HostMeta,
     /// Index into [`Workspace::files`].
     #[serde(skip)]
     pub index: usize,
@@ -732,10 +735,46 @@ impl Workspace {
                 file: self.abs(wl.file),
                 section: config.section_name(wl.loc).map(str::to_string),
                 text: h.text(),
+                meta: h.meta(),
                 index: wl.file,
             });
         }
         Ok((shown, warnings))
+    }
+
+    /// The read commands' view of the host at `wl` (see
+    /// [`crate::projection`]): its block, section, absolute file path and
+    /// the workspace's `Host *`.
+    pub fn view(&self, wl: WorkspaceLocation) -> crate::projection::HostView<'_> {
+        let config = &self.files[wl.file].config;
+        crate::projection::HostView {
+            block: config.host(wl.loc),
+            section: config.section_name(wl.loc),
+            file: self.abs(wl.file),
+            defaults: self.defaults(),
+        }
+    }
+
+    /// The view of the host named `name` in file `file`, by primary name.
+    pub fn view_of(&self, file: usize, name: &str) -> Option<crate::projection::HostView<'_>> {
+        let loc = self.files[file].config.find_primary(name)?;
+        Some(self.view(WorkspaceLocation { file, loc }))
+    }
+
+    /// `show`'s entry for the host named `name` (primary name) in file
+    /// `file`, for a host picked by `--where` or `--section`.
+    pub fn shown_at(&self, file: usize, name: &str) -> Option<WorkspaceShown> {
+        let config = &self.files[file].config;
+        let loc = config.find_primary(name)?;
+        let h = config.host(loc);
+        Some(WorkspaceShown {
+            name: h.primary(),
+            file: self.abs(file),
+            section: config.section_name(loc).map(str::to_string),
+            text: h.text(),
+            meta: h.meta(),
+            index: file,
+        })
     }
 
     /// `dump`: the text of the root, or of the file `--file` names.
@@ -1119,12 +1158,27 @@ impl Workspace {
         append: bool,
         file: Option<&str>,
     ) -> Result<Change<Vec<String>>> {
+        self.set_with_tags(selector, pairs, append, &[], &[], file)
+    }
+
+    /// [`Workspace::set`] plus `--tag` and `--untag` (see
+    /// [`Config::set_with_tags`](crate::Config::set_with_tags)).
+    pub fn set_with_tags(
+        &mut self,
+        selector: &HostSelector,
+        pairs: &[(String, String)],
+        append: bool,
+        add_tags: &[String],
+        remove_tags: &[String],
+        file: Option<&str>,
+    ) -> Result<Change<Vec<String>>> {
         let target = self.target(file)?;
-        for (k, _) in pairs {
-            check_settable(k)?;
-        }
-        let (names, files, warnings) =
-            self.update_hosts(selector, target, |b| apply_pairs(b, pairs, append))?;
+        check_set_args(pairs, add_tags)?;
+        let (names, files, warnings) = self.update_hosts(selector, target, |b| {
+            apply_pairs(b, pairs, append);
+            b.add_tags(add_tags);
+            b.remove_tags(remove_tags);
+        })?;
         let msg = self.updated_message(selector, &names, &files);
         Ok(self.change(names, files, vec![msg], warnings))
     }
@@ -1176,8 +1230,8 @@ impl Workspace {
         if self.find_host(&spec.new_name).is_some() {
             return Err(Error::TargetExists(spec.new_name.clone()));
         }
-        for (k, _) in &spec.overrides {
-            check_settable(k)?;
+        for (k, v) in &spec.overrides {
+            check_pair(k, v)?;
         }
         let dest = match (target, &spec.section) {
             (Some(f), _) => f,

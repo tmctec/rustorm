@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here. Format follows [Keep a Changelog](https://keepachangelog.com).
 
+## [anemone] - 2026-10-02
+
+### Added
+- Host metadata (D25): `# note:`, `# location:`, `# privateKeyLocation:`, `# other:` and `# tags:` comment lines directly above a `Host` line are keys. `set`, `unset`, `add -o`, `clone` and the settings forms take them like ssh keywords; `set --tag`/`--untag` edit the tag list; `clone`, `move` and `combine` carry the lines; `search` matches them and prints a matching metadata line under the host; `--json` rows of `list`, `show` and `search` carry a `"meta"` object. `privateKeyLocation` refuses key material.
+- Reading output (D26, D27): `show`, `list` and `search` take `--where KEY=VALUE|KEY!=VALUE|KEY~PATTERN` (comma OR, repeated AND, contains on list keys), `--filter KEYS` (exactly the named keys: ssh keywords, metadata keys, `Host`, `section`, `file`), `--format txt|json|csv|yaml|yml`, `--just-value` and `--allow-missing`; `--section` selects hosts on `show` and `search`; `show` runs without a name when `--where`/`--section` select. An unset filtered key warns and exits 4. Shell completion offers the key names and format names.
+- rustorm-core: `meta` module (`MetaKey`, `HostMeta`, `HostBlock::set_meta`/`append_meta`/`unset_meta`/`add_tags`/`remove_tags`; `get`/`get_all`/`set`/`append`/`unset` route metadata keys), `projection` module (`HostView`, `Where`, `Format`, `resolve`, `project`, `render`, `completion_keys`), `Config::set_with_tags`, `Workspace::set_with_tags`/`view`/`view_of`/`shown_at`; `KeyGroup::Notes` with a `KeySpec` per metadata key, so `SettingsDraft` covers them; `complete_line` completes `# no` to `# note: `.
+- rustorm-tui: Notes & location group first in the settings form with the tags in use listed under the tags row; the status line shows the selected host's location, tags and first note; `/` matches metadata.
+- rustorm-gui: the detail panel shows location, tag chips and notes; All settings has the Notes & location group with tag chips (× removes, ▾ offers the tags in use); the filter matches metadata.
+- Tests: core meta-1..13 and read-1..24 (jq, Python csv and PyYAML read every format back), CLI cases for flag parsing and exit codes, TUI mt-1..6, GUI mg-1..5, parity par-14..15; docs/cli.md gains a Reading output examples block run from fixtures the binary generates (`make fixtures-read`); `make test-meta`.
+
+### Changed
+- `--json list/show/search` rows carry a `"meta"` object (`{}` when the host has none).
+- `set`'s KEY VALUE list no longer accepts bare hyphen values, so flags after it parse; a value starting with `-` goes after `--`.
+- docs/cli.md: D1 names the repository `rustorm`; new sections Host metadata and Reading output; exit code 4.
+
 ## [fieldfare] - 2026-09-29
 
 ### Added

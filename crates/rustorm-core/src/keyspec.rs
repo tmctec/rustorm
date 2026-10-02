@@ -3,10 +3,14 @@
 //! passes before it is written.
 
 use crate::keys::{canonical_key, is_multi_valued, KNOWN_KEYS};
+use crate::meta::{is_meta_key, validate_meta, MetaKey};
 
 /// Where a keyword shows in the settings form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum KeyGroup {
+    /// The metadata comments above the host: note, location,
+    /// privateKeyLocation, other, tags (docs/cli.md, Host metadata).
+    Notes,
     /// Who and where to connect, and the session itself.
     Connection,
     /// Keys, agents, passwords and host-key checking.
@@ -23,7 +27,8 @@ pub enum KeyGroup {
 
 impl KeyGroup {
     /// Every group, in form order.
-    pub const ALL: [KeyGroup; 6] = [
+    pub const ALL: [KeyGroup; 7] = [
+        KeyGroup::Notes,
         KeyGroup::Connection,
         KeyGroup::Authentication,
         KeyGroup::Forwarding,
@@ -35,6 +40,7 @@ impl KeyGroup {
     /// The heading the forms show.
     pub fn title(self) -> &'static str {
         match self {
+            KeyGroup::Notes => "Notes & location",
             KeyGroup::Connection => "Connection",
             KeyGroup::Authentication => "Authentication",
             KeyGroup::Forwarding => "Forwarding",
@@ -223,6 +229,9 @@ fn classify(key: &str) -> (KeyGroup, KeyType) {
 /// assert!(key_spec("Match").is_none());
 /// ```
 pub fn key_spec(key: &str) -> Option<KeySpec> {
+    if let Some(m) = MetaKey::parse(key) {
+        return Some(meta_spec(m));
+    }
     let key = KNOWN_KEYS.iter().find(|k| k.eq_ignore_ascii_case(key))?;
     if NOT_SETTABLE.contains(key) {
         return None;
@@ -236,10 +245,30 @@ pub fn key_spec(key: &str) -> Option<KeySpec> {
     })
 }
 
-/// Every keyword a host can set, in [`KNOWN_KEYS`] order.
-pub fn key_specs() -> Vec<KeySpec> {
-    KNOWN_KEYS.iter().filter_map(|k| key_spec(k)).collect()
+/// The spec of a metadata key: free text in the Notes group; `note` takes
+/// one row per line.
+fn meta_spec(m: MetaKey) -> KeySpec {
+    KeySpec {
+        key: m.name(),
+        group: KeyGroup::Notes,
+        kind: KeyType::Text,
+        multi: m.is_multi_line(),
+    }
 }
+
+/// Every keyword a host can set: the metadata keys in write order, then
+/// the ssh keywords in [`KNOWN_KEYS`] order.
+pub fn key_specs() -> Vec<KeySpec> {
+    MetaKey::ALL
+        .into_iter()
+        .map(meta_spec)
+        .chain(KNOWN_KEYS.iter().filter_map(|k| key_spec(k)))
+        .collect()
+}
+
+/// The metadata keys as the start of a comment line, for completing
+/// `# no` into `# note: ` in the editor.
+const META_LINE_KEYS: &[&str] = &["note:", "location:", "privateKeyLocation:", "other:", "tags:"];
 
 /// Algorithm lists: long, rarely set by hand, and sharing prefixes with
 /// everyday keywords, so completion offers them only when typed in full.
@@ -421,8 +450,9 @@ impl LineCompletion {
 /// The keyword suggestion for `line` with the cursor at column `col`, when
 /// the cursor ends the line's first word: settable keywords on an indented
 /// line, `Host`, `Match` and `Include` at column 0, matched as
-/// [`complete_setting`] does. `None` in a comment, a value, the middle of a
-/// word, or when nothing matches.
+/// [`complete_setting`] does; in a comment, the metadata keys (`# no` →
+/// `# note: `). `None` in a value, the middle of a word, or when nothing
+/// matches.
 ///
 /// ```
 /// use rustorm_core::complete_line;
@@ -431,6 +461,7 @@ impl LineCompletion {
 /// assert_eq!(c.accept("    por").line, "    Port 22");
 /// assert_eq!(complete_line("ho", 2).unwrap().keyword, "Host");
 /// assert!(complete_line("    User tra", 12).is_none());
+/// assert_eq!(complete_line("# loc", 5).unwrap().accept("# loc").line, "# location: ");
 /// ```
 pub fn complete_line(line: &str, col: usize) -> Option<LineCompletion> {
     let chars: Vec<char> = line.chars().collect();
@@ -438,8 +469,11 @@ pub fn complete_line(line: &str, col: usize) -> Option<LineCompletion> {
     if col <= indent || col > chars.len() {
         return None;
     }
+    if chars[indent] == '#' {
+        return complete_meta_line(&chars, indent, col);
+    }
     let word = &chars[indent..col];
-    if word[0] == '#' || word.iter().any(|c| c.is_whitespace() || *c == '=') {
+    if word.iter().any(|c| c.is_whitespace() || *c == '=') {
         return None;
     }
     if chars
@@ -453,6 +487,9 @@ pub fn complete_line(line: &str, col: usize) -> Option<LineCompletion> {
         complete_from(BLOCK_KEYS, &typed)
     } else {
         complete_setting(&typed)
+            .into_iter()
+            .filter(|k| !is_meta_key(k))
+            .collect()
     }
     .into_iter()
     .next()?;
@@ -460,6 +497,35 @@ pub fn complete_line(line: &str, col: usize) -> Option<LineCompletion> {
         keyword,
         word: indent..col,
         premade: premade_value(keyword),
+    })
+}
+
+/// The metadata-key suggestion for a comment line: the word after `#` and
+/// its spaces, ending at the cursor, matched against `note:`, `location:`
+/// and the rest. Accepting gives `# key: `.
+fn complete_meta_line(chars: &[char], indent: usize, col: usize) -> Option<LineCompletion> {
+    let start = indent
+        + 1
+        + chars[indent + 1..]
+            .iter()
+            .take_while(|c| **c == ' ' || **c == '\t')
+            .count();
+    if col <= start {
+        return None;
+    }
+    let word = &chars[start..col];
+    if word.iter().any(|c| c.is_whitespace() || *c == ':') {
+        return None;
+    }
+    if chars.get(col).is_some_and(|c| !c.is_whitespace()) {
+        return None;
+    }
+    let typed: String = word.iter().collect();
+    let keyword = complete_from(META_LINE_KEYS, &typed).into_iter().next()?;
+    Some(LineCompletion {
+        keyword,
+        word: start..col,
+        premade: None,
     })
 }
 
@@ -515,6 +581,9 @@ pub fn validate_setting(key: &str, value: &str) -> std::result::Result<(), Strin
     }
     if v.contains('\n') || v.contains('\r') {
         return Err("must be on one line".into());
+    }
+    if let Some(m) = MetaKey::parse(key) {
+        return validate_meta(m, v);
     }
     let Some(spec) = key_spec(key) else {
         return Ok(());
@@ -676,12 +745,12 @@ impl SettingsDraft {
                     inherited: inherited.clone(),
                     added: false,
                 };
-                let values = block.get_all(spec.key);
                 if spec.multi {
-                    rows.extend(values.into_iter().map(row));
+                    rows.extend(block.get_all(spec.key).into_iter().map(row));
                     rows.push(row(String::new()));
                 } else {
-                    rows.push(row(values.into_iter().next().unwrap_or_default()));
+                    // `get` gives the first value, or the whole tag list.
+                    rows.push(row(block.get(spec.key).unwrap_or_default()));
                 }
             }
         }

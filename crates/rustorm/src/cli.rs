@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// rustorm manages the hosts in your ~/.ssh/config.
 #[derive(Debug, Parser)]
@@ -34,7 +34,7 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub quiet: bool,
 
-    /// Section for add, edit, clone, move and list
+    /// Section for add, edit, clone, move, list, show and search
     #[arg(short, long, global = true, value_name = "NAME")]
     pub section: Option<String>,
 
@@ -68,6 +68,42 @@ pub enum Shell {
     Fish,
     /// PowerShell
     Powershell,
+}
+
+/// `--format` names (docs/cli.md, Reading output).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum FormatName {
+    /// Lines as the file spells them
+    Txt,
+    /// One JSON document
+    Json,
+    /// RFC 4180 rows
+    Csv,
+    /// A YAML sequence
+    Yaml,
+    /// Same as yaml
+    Yml,
+}
+
+/// The read options `list`, `show` and `search` share (docs/cli.md,
+/// Reading output).
+#[derive(Debug, Clone, Default, Args)]
+pub struct ReadArgs {
+    /// Keep hosts where KEY=VALUE, KEY!=VALUE or KEY~PATTERN holds (repeatable; all must hold)
+    #[arg(long = "where", value_name = "KEY=VALUE")]
+    pub where_: Vec<String>,
+    /// Print only these keys, comma-separated, in this order
+    #[arg(long, value_name = "KEYS")]
+    pub filter: Option<String>,
+    /// Output format
+    #[arg(long, value_name = "FMT", value_enum)]
+    pub format: Option<FormatName>,
+    /// Print values only, without keys
+    #[arg(long)]
+    pub just_value: bool,
+    /// Exit 0 when a filtered key is not set on a host
+    #[arg(long)]
+    pub allow_missing: bool,
 }
 
 /// Every rustorm command.
@@ -112,11 +148,17 @@ pub enum Cmd {
         /// Add a value to a multi-valued key instead of replacing
         #[arg(short, long)]
         append: bool,
+        /// Add a tag to the host's # tags: line (repeatable)
+        #[arg(long, value_name = "TAG")]
+        tag: Vec<String>,
+        /// Remove a tag from the host's # tags: line (repeatable)
+        #[arg(long, value_name = "TAG")]
+        untag: Vec<String>,
         /// Existing host name, or pattern with --regex
         #[arg(value_name = "NAME")]
         name: String,
-        /// KEY VALUE pairs
-        #[arg(value_name = "KEY VALUE", required = true, allow_hyphen_values = true)]
+        /// KEY VALUE pairs (a value starting with - goes after --)
+        #[arg(value_name = "KEY VALUE")]
         pairs: Vec<String>,
     },
     /// Remove keys from a host
@@ -180,12 +222,16 @@ pub enum Cmd {
         /// Print only names
         #[arg(short, long)]
         names: bool,
+        #[command(flatten)]
+        read: ReadArgs,
     },
     /// Print entries verbatim
     Show {
-        /// Existing host names or aliases
-        #[arg(value_name = "NAME", required = true)]
+        /// Existing host names or aliases (optional with --where or --section)
+        #[arg(value_name = "NAME")]
         names: Vec<String>,
+        #[command(flatten)]
+        read: ReadArgs,
     },
     /// Print the whole config file as parsed
     #[command(visible_alias = "cat")]
@@ -199,6 +245,8 @@ pub enum Cmd {
         /// Regular expression
         #[arg(value_name = "PATTERN", allow_hyphen_values = true)]
         pattern: String,
+        #[command(flatten)]
+        read: ReadArgs,
     },
     /// Add names to a host's Host line
     Alias {
@@ -311,6 +359,8 @@ impl Cmd {
                 | Cmd::Clone { .. }
                 | Cmd::Move { .. }
                 | Cmd::List { .. }
+                | Cmd::Show { .. }
+                | Cmd::Search { .. }
         )
     }
 

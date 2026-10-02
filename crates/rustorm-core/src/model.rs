@@ -247,16 +247,25 @@ impl HostBlock {
         self.body.iter().filter_map(Line::directive).collect()
     }
 
-    /// The first value of `key` (matched case-insensitively).
+    /// The first value of `key` (matched case-insensitively). A metadata
+    /// key (see [`crate::meta`]) gives its value from the leading comments;
+    /// `tags` gives the whole list joined with `, `.
     pub fn get(&self, key: &str) -> Option<String> {
+        if let Some(m) = crate::meta::MetaKey::parse(key) {
+            return self.meta().display(m);
+        }
         self.directives()
             .into_iter()
             .find(|d| d.key.eq_ignore_ascii_case(key))
             .map(|d| d.value)
     }
 
-    /// Every value of `key` (matched case-insensitively), in file order.
+    /// Every value of `key` (matched case-insensitively), in file order. A
+    /// metadata key gives its note lines, its tags, or its one value.
     pub fn get_all(&self, key: &str) -> Vec<String> {
+        if let Some(m) = crate::meta::MetaKey::parse(key) {
+            return self.meta_values(m);
+        }
         self.directives()
             .into_iter()
             .filter(|d| d.key.eq_ignore_ascii_case(key))
@@ -314,7 +323,13 @@ impl HostBlock {
     /// Sets `key` to `value`: the first line with that key is rewritten in
     /// canonical key case (keeping its indentation and separator), every
     /// other line with that key is removed, and a missing key is appended.
+    /// A metadata key is written as a comment above the `Host` line (see
+    /// [`HostBlock::set_meta`]).
     pub fn set(&mut self, key: &str, value: &str) {
+        if let Some(m) = crate::meta::MetaKey::parse(key) {
+            self.set_meta(m, &[value.to_string()]);
+            return;
+        }
         let canonical = keys::canonical_key(key);
         let mut first: Option<usize> = None;
         let mut i = 0;
@@ -356,8 +371,13 @@ impl HostBlock {
     }
 
     /// Adds a `key value` line after the last line with the same key, or
-    /// after the last directive when the key is absent.
+    /// after the last directive when the key is absent. A metadata key gains
+    /// a note line or a tag (see [`HostBlock::append_meta`]).
     pub fn append(&mut self, key: &str, value: &str) {
+        if let Some(m) = crate::meta::MetaKey::parse(key) {
+            self.append_meta(m, value);
+            return;
+        }
         let canonical = keys::canonical_key(key);
         let line = Line::new(&format!("{}{} {}", self.indent(), canonical, value));
         let same_key = self.body.iter().rposition(|l| {
@@ -378,7 +398,11 @@ impl HostBlock {
     }
 
     /// Removes every line with `key`. Returns true when a line was removed.
+    /// A metadata key loses its comment lines (see [`HostBlock::unset_meta`]).
     pub fn unset(&mut self, key: &str) -> bool {
+        if let Some(m) = crate::meta::MetaKey::parse(key) {
+            return self.unset_meta(m);
+        }
         let before = self.body.len();
         self.body.retain(|l| {
             !l.directive()

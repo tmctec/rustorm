@@ -785,3 +785,94 @@ fn par_13_refusals() {
     );
     p.untouched();
 }
+
+/// par-14: host metadata through Add setting — a location and two tags land
+/// as `# key: value` lines above `Host lab` in one write.
+#[test]
+fn par_14_metadata_settings() {
+    let mut p = Pair::new();
+    select(&mut p.tui, "lab");
+    p.tui.handle(key(KeyCode::Enter));
+    p.tui.handle(key(KeyCode::End));
+    typ(&mut p.tui, "loca");
+    p.tui.handle(key(KeyCode::Tab));
+    typ(&mut p.tui, "Austin DC, rack 4");
+    p.tui.handle(key(KeyCode::End));
+    typ(&mut p.tui, "tags");
+    p.tui.handle(key(KeyCode::Tab));
+    typ(&mut p.tui, "prod, db");
+    p.tui.handle(key(KeyCode::Enter));
+
+    click(&mut p.gui, "lab");
+    click(&mut p.gui, "All settings");
+    type_into(&mut p.gui, "Add setting", "loca");
+    p.gui.key_press(egui::Key::Tab);
+    p.gui.run();
+    p.gui
+        .get_all_by_label("location")
+        .last()
+        .unwrap()
+        .type_text("Austin DC, rack 4");
+    p.gui.run();
+    type_into(&mut p.gui, "Add setting", "tags");
+    p.gui.key_press(egui::Key::Tab);
+    p.gui.run();
+    p.gui
+        .get_all_by_label("tags")
+        .last()
+        .unwrap()
+        .type_text("prod, db");
+    p.gui.run();
+    click(&mut p.gui, "Save settings");
+
+    p.core(|ws| {
+        ws.apply_settings(
+            "lab",
+            &[
+                SettingChange::set("location", "Austin DC, rack 4"),
+                SettingChange::set("tags", "prod, db"),
+            ],
+            None,
+        )
+        .unwrap();
+    });
+    p.same_files();
+    p.same_message();
+    let text = std::fs::read_to_string(p.c.file("config.d/benchfile")).unwrap();
+    assert!(
+        text.contains("# location: Austin DC, rack 4\n# tags: prod, db\nHost lab\n"),
+        "{text}"
+    );
+}
+
+/// par-15: key material in privateKeyLocation is refused alike and writes
+/// nothing.
+#[test]
+fn par_15_key_material_refused() {
+    const BLOB: &str = "-----BEGIN OPENSSH PRIVATE KEY-----";
+    const MSG: &str = "privateKeyLocation holds a reference to a key, not the key itself.";
+    let mut p = Pair::new();
+    select(&mut p.tui, "lab");
+    p.tui.handle(key(KeyCode::Enter));
+    p.tui.handle(key(KeyCode::End));
+    typ(&mut p.tui, "privatek");
+    p.tui.handle(key(KeyCode::Tab));
+    typ(&mut p.tui, BLOB);
+    p.tui.handle(key(KeyCode::Enter));
+    assert!(screen(&mut p.tui).contains(&format!("Error: {MSG}")));
+
+    click(&mut p.gui, "lab");
+    click(&mut p.gui, "All settings");
+    type_into(&mut p.gui, "Add setting", "privatek");
+    p.gui.key_press(egui::Key::Tab);
+    p.gui.run();
+    p.gui
+        .get_all_by_label("privateKeyLocation")
+        .last()
+        .unwrap()
+        .type_text(BLOB);
+    p.gui.run();
+    assert!(!p.gui.state_mut().save_settings());
+    assert_eq!(p.gui.state().settings_error(), Some(MSG));
+    p.untouched();
+}

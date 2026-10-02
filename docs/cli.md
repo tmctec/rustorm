@@ -8,7 +8,7 @@ This document is the contract the implementation is built against. Each command 
 
 | # | Decision | Alternative | Status |
 |---|---|---|---|
-| D1 | The binary and crate are `rustorm`, short for rust storm. The repository is `rs-storm`. The implementation is Rust. | `storm`, `sshc` | agreed |
+| D1 | The binary, crate and repository are `rustorm`, short for rust storm. The implementation is Rust. | `storm`, `sshc` | agreed |
 | D2 | Every write first backs the file up to `<config>~`. `--no-backup` skips it. `backup <file>` still exists for named copies. | Explicit backup only, as in stormssh | agreed |
 | D3 | `set --regex <pattern>` replaces stormssh's `update`. One command edits keys; a flag widens it to many hosts. | Keep `update` as a separate command | agreed |
 | D4 | `alias` and `unalias` manage extra names on the `Host` line. Command aliases (`rm` for `delete`) live in rustorm's own config file. | stormssh's meaning of "alias" (command aliases only) | agreed |
@@ -32,6 +32,9 @@ This document is the contract the implementation is built against. Each command 
 | D22 | A write goes to one file: `--file` when given; else the file holding the host for an edit of an existing host; else the file holding the section for `--section`, the root when no file holds it; else the root. A section in two files is an error naming both; a host in two files is edited where ssh reads it first, with a warning. `delete-all` sweeps every file. | Write every change to the root | agreed |
 | D23 | Every `--json` row carries a `"file"` field with the absolute path of the file holding it, on a workspace of one file too. | Add the field only when more than one file is loaded | agreed |
 | D24 | An included file that cannot be read is skipped by read commands with a warning; a write routed to it fails with exit 3. | Fail every command while any include is unreadable | agreed |
+| D25 | Host metadata lives in `# key: value` comment lines directly above the `Host` line. The keys are `note`, `location`, `privateKeyLocation`, `other` and `tags`; `set`, `unset`, `add` and `clone` take them like ssh keys. `ssh` ignores the lines and the file stays plain ssh_config. | A sidecar file or rustorm's own config | agreed |
+| D26 | `show`, `list` and `search` take `--where`, `--filter`, `--format txt\|json\|csv\|yaml` and `--just-value`. Output holds exactly the keys named in `--filter`; `Host` is a key like any other. `--json` means `--format json`. | A separate `get` command | agreed |
+| D27 | A key named in `--filter` that a host does not set, directly or through `Host *`, prints empty and the command exits 4 after a warning per host and key. `--allow-missing` exits 0. `Host`, `section`, `file` and the metadata list `tags` are never missing. | Exit 0 with an empty value | agreed |
 
 ## Synopsis
 
@@ -45,10 +48,10 @@ rustorm [GLOBAL OPTIONS] <COMMAND> [ARGS]
 |---|---|
 | `-c, --config <FILE>` | Operate on `FILE` instead of `~/.ssh/config`. |
 | `--no-backup` | Do not write `<config>~` before changing the file. |
-| `--json` | Emit JSON instead of text on `list`, `show`, `dump`, `search`, `check`, `includes`. This is the machine interface; there is no web API. |
+| `--json` | Emit JSON instead of text on `list`, `show`, `dump`, `search`, `check`, `includes`. This is the machine interface; there is no web API. On `list`, `show` and `search` it is the same as `--format json` (see Reading output). |
 | `--no-color` | Disable ANSI color. `NO_COLOR` in the environment does the same. |
 | `-q, --quiet` | Suppress success messages. Errors still print. |
-| `-s, --section <NAME>` | Section for `add`, `edit`, `clone`, `move` and `list`; accepted before or after the command. |
+| `-s, --section <NAME>` | Section for `add`, `edit`, `clone`, `move`, `list`, `show` and `search`; accepted before or after the command. On the three read commands it selects hosts, the same as `--where section=NAME`. |
 | `-f, --file <NAME\|FILE>` | The workspace file for `add`, `edit`, `clone`, `move`, `set`, `unset`, `delete`, `alias`, `unalias`, `add-section`, `rename-section`, `delete-all` and `dump`, overriding routing (see Included files); every other command refuses it with exit 2. `NAME` is a loaded file's name, such as `cypress`; anything else is a path. |
 | `-V, --version` | Print the version and exit. |
 | `-h, --help` | Print help and exit. |
@@ -233,6 +236,150 @@ $ rustorm delete-all --yes
 
 `set --regex` reports `3 hosts updated in 2 files: cypressPro, cypressPro-ext, dcevant`. `delete-all` asks `Delete 8 hosts from 5 files? [y/N]`; with `--file` it sweeps that file alone and names it as on a single file. Errors that name no host or section keep their single-file text.
 
+## Host metadata
+
+ssh_config has no place for a note, a location or a tag, so rustorm keeps them in comment lines directly above the `Host` line, in the block of leading comments the host already owns (D25). The lines are plain comments: `ssh` and every other tool ignore them, and the file stays valid ssh_config.
+
+```
+# Primary build box. Reboot only after 18:00.
+# note: Primary build box
+# note: Reboot only after 18:00
+# location: Austin DC, rack 4, U12
+# privateKeyLocation: keepassxc
+# other: owner alice
+# tags: prod, austin, db
+Host buildbox
+    HostName 10.0.4.12
+    User deploy
+```
+
+**Line shape.** `#`, optional spaces, the key, `:`, optional spaces, the value. A comment that does not fit this shape, or whose key is not one of the five below, is an ordinary comment and is never read, moved or rewritten as metadata. `# TODO: fix` is a comment. `# section: <name>` is a banner label line (D16) and is never metadata.
+
+**Keys.**
+
+| Key | Holds | Lines |
+|---|---|---|
+| `note` | Free text. | One or more; each `# note:` line is one line of the note, in file order. |
+| `location` | Where the machine is, free text. | One. |
+| `privateKeyLocation` | Where the private key lives: a vault name such as `keepassxc`, a vault entry, a path. A reference only; rustorm never reads a key store or fetches a key, and rejects a value that looks like key material (`-----BEGIN`). | One. |
+| `other` | Free text that fits none of the above. | One. |
+| `tags` | A list of labels separated by commas. A tag has no spaces or commas; `-` and `_` are fine. Tags compare case-insensitively and duplicates are dropped. | One. |
+
+Keys are read case-insensitively (`# Location:` and `# location:` are the same key) and written in exactly the spelling of the table. A key's value is the text after the colon with surrounding whitespace trimmed; an empty value removes the line.
+
+**Where the lines go.** An existing metadata line is edited in place. A new one goes directly above the `Host` line, below every other leading comment, and new lines keep the order of the table: `note`, `location`, `privateKeyLocation`, `other`, `tags`. Other comment lines above the host are never moved or changed.
+
+**Commands.** Metadata keys are accepted wherever an ssh key is: `set NAME note "text"`, `unset NAME location`, `add NAME URI -o location="Austin DC"`, `clone NAME NEW location "Austin DC"`. `set` on `note` replaces every `# note:` line with one; `set --append NAME note "text"` adds a line (D13). `set NAME tags "prod, db"` replaces the list; `set --tag prod` adds one tag and `set --untag prod` removes one, and both may repeat. `--regex` applies as it does to ssh keys. The lines travel with the host through `clone`, `move`, `combine` and `delete` because they are leading comments. `show` and `dump` print them where they are; `--json` rows of `list`, `show` and `search` carry a `"meta"` object (`note` and `tags` as arrays, the rest as strings, absent keys omitted); `search` matches their text and prints the matching line under the host; `--filter` and `--where` take them as keys (see Reading output). The TUI settings form and the GUI detail panel edit them in a Notes & location group.
+
+## Reading output
+
+`show`, `list` and `search` share four options that pick hosts, pick keys and pick a format (D26). Without them the commands print what their own sections describe.
+
+```
+rustorm show  [<NAME>...] [-s NAME] [--where KEY=VALUE]... [--filter KEYS] [--format FMT] [--just-value] [--allow-missing]
+rustorm list              [-s NAME] [--where KEY=VALUE]... [--filter KEYS] [--format FMT] [--just-value] [--allow-missing]
+rustorm search <PATTERN>  [-s NAME] [--where KEY=VALUE]... [--filter KEYS] [--format FMT] [--just-value] [--allow-missing]
+```
+
+**Keys.** A key is an ssh_config keyword (`HostName`, `Port`, `IdentityFile`), a metadata key (`note`, `location`, `privateKeyLocation`, `other`, `tags`) or one of three pseudo-keys: `Host` (the primary name), `section` (the section name, empty for a host outside every section) and `file` (the absolute path of the file holding the host). Keys match case-insensitively; `hostname`, `HostName` and `HOSTNAME` are the same key. A value an ssh key does not set on the host falls back to `Host *`, as `list` already does for `User` and `Port`. The catch-all section is called `other` and so is a metadata key; `--section other` and `--where section=other` select hosts, `--filter other` selects the key.
+
+**`--where KEY<op>VALUE`** selects hosts. Repeatable; every `--where` must hold (AND).
+
+| Form | Holds when |
+|---|---|
+| `KEY=VALUE` | The host's value equals `VALUE`, ignoring case. On a list key (`tags`, `IdentityFile`, every multi-valued key of D13) when the list contains it. |
+| `KEY=A,B` | Any of the comma-separated values matches (OR). |
+| `KEY!=VALUE` | `KEY=VALUE` does not hold. True for a host that does not set the key. |
+| `KEY~PATTERN` | A regular expression (the `search` syntax, D7) matches the value, or any value of a list key. |
+
+`-s, --section NAME` is `--where section=NAME` with one difference kept from `list`: a section that exists in no file is an error, exit 1. A `--where` that selects no host prints nothing: `list` exits 0, `show` and `search` exit 1. `show` needs a name unless `--where` or `--section` is given; with both, the named hosts are kept only when they also match.
+
+**`--filter KEYS`** picks the keys to print, comma-separated, in the order given. The output holds exactly these keys and nothing else: leave `Host` out and no name is printed. Without `--filter`, `txt` and `json` print the command's usual output (`list` and `search` the rows, `show` the entries); `csv` and `yaml` use the keys `Host,hostname,user,port,section,file`.
+
+**`--format FMT`** is `txt` (the default), `json`, `csv` or `yaml`; `yml` names the same format as `yaml`. `--json` is `--format json`; naming both with different formats is a usage error, exit 2.
+
+| Format | With `--filter` | With `--just-value` |
+|---|---|---|
+| `txt` | Per host, one line per key: the file's own line, as spelled and indented in the file, for ssh keys and metadata (`    HostName 10.7.112.72`, `# location: Austin DC`); `Host NAME` for `Host`; `    section NAME` and `    file PATH` for the pseudo-keys. A list key prints every line. A key the host does not set prints nothing. Hosts follow each other without a separator. | One value per line, no keys, no `Host` line. A list key prints one value per line. A key the host does not set prints an empty line, so the line count matches the filter. |
+| `json` | An array with one object per host, the keys spelled as typed in `--filter`, strings for single values, arrays for `note`, `tags` and multi-valued ssh keys, `null` for a key the host does not set. | An array with one array per host, values in filter order. |
+| `csv` | A header row of the keys as typed, then one row per host. A list joins its values with `;`. A field holding `,`, `"` or a line break is quoted; `"` doubles. A key the host does not set is an empty field. | The rows without the header. |
+| `yaml` | A sequence of mappings, keys as typed. A list is a flow sequence `[prod, db]`. A value is quoted whenever YAML would read it as anything but that string: `yes`, `no`, `on`, `off`, `true`, `false`, `null`, `~`, a number such as `22`, or text starting with a YAML indicator or holding `: ` or ` #`. `10.7.112.72` is a string and prints bare. | A sequence of flow sequences, values in filter order. |
+
+**`--just-value`** drops the keys and prints values only, as the table says.
+
+**`--allow-missing`** makes a key the host does not set an ordinary empty value: no warning, exit 0 (D27). Without it the output is still complete; each unset key on each printed host adds `warning: NAME has no 'KEY'` on stderr and the command exits 4 once everything is printed. `Host`, `section`, `file` and `tags` are never missing: a host outside every section has an empty `section` and a host without `# tags:` has an empty list.
+
+**Examples**
+
+```
+$ rustorm show D72 --filter Host,hostname,user
+Host D72
+    hostname 10.7.112.72
+    user travis
+
+$ rustorm show D72 --filter hostname,user
+    hostname 10.7.112.72
+    user travis
+
+$ rustorm show D72 --filter hostname --just-value
+10.7.112.72
+
+$ rustorm show D72 --filter Host,hostname,user --format yaml
+- Host: D72
+  hostname: 10.7.112.72
+  user: travis
+
+$ rustorm show D72 D73 --filter Host,hostname --format csv
+Host,hostname
+D72,10.7.112.72
+D73,10.7.112.73
+
+$ rustorm show buildbox --filter Host,note,location,privateKeyLocation --format json
+[{"Host":"buildbox","note":["Primary build box","Reboot only after 18:00"],"location":"Austin DC, rack 4, U12","privateKeyLocation":"keepassxc"}]
+
+$ rustorm list --section "df austin" --filter Host,hostname,user --format csv
+Host,hostname,user
+D72,10.7.112.72,travis
+D73,10.7.112.73,travis
+
+$ rustorm list --where tags=prod --where location~Austin --filter Host,tags --format yml
+- Host: buildbox
+  tags: [prod, austin, db]
+
+$ rustorm list --filter Host,section,file --format yaml
+- Host: github
+  section: other
+  file: /home/me/.ssh/config
+- Host: D72
+  section: df austin
+  file: /home/me/.ssh/config.d/df-austin
+
+$ rustorm search keepassxc --filter Host,privateKeyLocation --format yaml
+- Host: buildbox
+  privateKeyLocation: keepassxc
+
+$ rustorm show D72 --filter Host,proxyjump --format json
+warning: D72 has no 'proxyjump'
+[{"Host":"D72","proxyjump":null}]
+$ echo $?
+4
+
+$ rustorm show D72 --filter Host,proxyjump --format json --allow-missing
+[{"Host":"D72","proxyjump":null}]
+$ echo $?
+0
+
+$ rustorm show --where tags=db,cache --filter hostname --just-value
+10.7.112.72
+10.0.4.12
+10.7.112.80
+
+$ rustorm list --json --format csv
+error: --json and --format csv conflict.
+$ echo $?
+2
+```
+
 ## Commands
 
 ### add
@@ -261,7 +408,7 @@ Appends a new `Host NAME` entry with `HostName`, `User` and `Port` from the URI.
 | Option | Effect |
 |---|---|
 | `-i, --identity <FILE>` | Writes `IdentityFile FILE`. |
-| `-o, --option KEY=VALUE` | Writes any ssh_config directive. Repeatable. Splits on the first `=` only. |
+| `-o, --option KEY=VALUE` | Writes any ssh_config directive, or a metadata key as a `# key: value` comment (see Host metadata). Repeatable. Splits on the first `=` only. |
 | `-s, --section <NAME>` | Places the entry in that section, creating it if needed. Without it: the catch-all section when sections exist, else the end of the file. |
 
 **Examples**
@@ -324,7 +471,7 @@ rustorm set [-r] [-a] <NAME|PATTERN> <KEY> <VALUE> [<KEY> <VALUE>]...
 
 **Description**
 
-Sets one or more keys on a host. The host must exist. Keys match case-insensitively and are written in canonical case (D6). On a multi-valued key `set` replaces every existing value; `--append` adds one more line (D13).
+Sets one or more keys on a host. The host must exist. Keys match case-insensitively and are written in canonical case (D6). On a multi-valued key `set` replaces every existing value; `--append` adds one more line (D13). A metadata key (`note`, `location`, `privateKeyLocation`, `other`, `tags`, see Host metadata) is set the same way and lands in a `# key: value` comment above the `Host` line; `note` is multi-valued, `tags` takes a comma-separated list, and an empty value removes the line.
 
 **Options**
 
@@ -332,6 +479,8 @@ Sets one or more keys on a host. The host must exist. Keys match case-insensitiv
 |---|---|
 | `-r, --regex` | Treat the first argument as a regular expression anchored to the whole host name and apply the change to every matching host. Replaces stormssh's `update`. |
 | `-a, --append` | Add a value to a multi-valued key instead of replacing. |
+| `--tag <TAG>` | Add one tag to `# tags:`, creating the line when absent. Repeatable. May be the only change: `set NAME --tag prod`. |
+| `--untag <TAG>` | Remove one tag; removing the last tag removes the line. Repeatable. |
 
 **Examples**
 
@@ -344,6 +493,12 @@ $ rustorm set -r 'vps-[1-5]' User emre
 
 $ rustorm set -a vps IdentityFile ~/.ssh/second.pem
 vps updated.
+
+$ rustorm set vps note "Primary build box" location "Austin DC, rack 4" --tag prod --tag db
+vps updated.
+
+$ rustorm set vps -- privateKeyLocation "-----BEGIN OPENSSH PRIVATE KEY-----"
+error: privateKeyLocation holds a reference to a key, not the key itself.
 
 $ rustorm set -r 'nomatch-.*' User x
 error: no host matches nomatch-.*
@@ -365,12 +520,15 @@ rustorm unset [-r] <NAME|PATTERN> <KEY>...
 
 **Description**
 
-Removes the named keys from a host. Removing every key leaves an empty `Host` line; use `delete` to remove the entry. Removing a key the host does not have is not an error.
+Removes the named keys from a host. Removing every key leaves an empty `Host` line; use `delete` to remove the entry. Removing a key the host does not have is not an error. A metadata key removes its `# key:` lines (every `# note:` line for `note`); other comments stay.
 
 **Examples**
 
 ```
 $ rustorm unset vps IdentityFile ProxyCommand
+vps updated.
+
+$ rustorm unset vps note tags
 vps updated.
 ```
 
@@ -524,12 +682,12 @@ Origin: both · Status: v1 · Aliases: `ls`
 **Synopsis**
 
 ```
-rustorm list [-l] [-n]
+rustorm list [-l] [-n] [-s NAME] [--where KEY=VALUE]... [--filter KEYS] [--format FMT] [--just-value] [--allow-missing]
 ```
 
 **Description**
 
-Prints one line per host, sorted by name, in the form `name -> user@hostname:port`. User and port fall back to the `Host *` defaults, then to `$USER` and `22`. A host without `HostName` shows `[no hostname]`. On a workspace of several files the hosts are grouped by file in load order, each group under a heading with the file's path, and a file's section headings follow its path heading; a file without hosts has no heading. `--json` rows carry the `"file"` field (D23).
+Prints one line per host, sorted by name, in the form `name -> user@hostname:port`. `--where`, `--filter`, `--format`, `--just-value` and `--allow-missing` select hosts, pick keys and change the format as Reading output describes; `--json` rows carry a `"meta"` object with the host's metadata (Host metadata). User and port fall back to the `Host *` defaults, then to `$USER` and `22`. A host without `HostName` shows `[no hostname]`. On a workspace of several files the hosts are grouped by file in load order, each group under a heading with the file's path, and a file's section headings follow its path heading; a file without hosts has no heading. `--json` rows carry the `"file"` field (D23).
 
 **Options**
 
@@ -566,7 +724,7 @@ github -> git@github.com:22
 vps    -> root@vps.example.com:2222
 
 $ rustorm --json list
-[{"name":"db1","file":"/home/me/.ssh/config","section":"data foundry","aliases":[],"hostname":"db1.example.com","user":"postgres","port":22,"options":{}}, ...]
+[{"name":"db1","file":"/home/me/.ssh/config","section":"data foundry","aliases":[],"hostname":"db1.example.com","user":"postgres","port":22,"options":{},"meta":{}}, ...]
 ```
 
 The section headings appear only when the file has sections. On the workspace of Included files:
@@ -602,12 +760,12 @@ Origin: ssh-config · Status: v1
 **Synopsis**
 
 ```
-rustorm show <NAME>...
+rustorm show [<NAME>...] [-s NAME] [--where KEY=VALUE]... [--filter KEYS] [--format FMT] [--just-value] [--allow-missing]
 ```
 
 **Description**
 
-Prints the entries verbatim as they appear in the file, including their comments. `NAME` may be a primary name or an alias.
+Prints the entries verbatim as they appear in the file, including their comments. `NAME` may be a primary name or an alias. At least one `NAME` is required unless `--where` or `--section` selects the hosts (Reading output); `--filter` replaces the verbatim entry with the named keys. `--json` objects carry `name`, `section`, `file`, `text` and a `"meta"` object (Host metadata).
 
 **Examples**
 
@@ -660,12 +818,12 @@ Origin: both · Status: v1 · Aliases: `find`, `grep`
 **Synopsis**
 
 ```
-rustorm search [-F] <PATTERN>
+rustorm search [-F] <PATTERN> [-s NAME] [--where KEY=VALUE]... [--filter KEYS] [--format FMT] [--just-value] [--allow-missing]
 ```
 
 **Description**
 
-Prints every host whose name, alias, key or value matches `PATTERN`, a regular expression (D7), in `list` format with matches highlighted. `-F, --fixed-strings` searches the literal text.
+Prints every host whose name, alias, key, value or metadata matches `PATTERN`, a regular expression (D7), in `list` format with matches highlighted. `-F, --fixed-strings` searches the literal text. When the match is in a metadata line and nowhere else on the row, the matching `# key: value` line prints indented under the host, so the output names the field. `--where`, `--filter`, `--format`, `--just-value` and `--allow-missing` work as Reading output describes and apply after the pattern.
 
 **Examples**
 
@@ -675,6 +833,10 @@ github -> git@github.com:22
 
 $ rustorm search 'example\.com:2[0-9]+'
 vps -> root@vps.example.com:2222
+
+$ rustorm search "rack 4"
+buildbox -> deploy@10.0.4.12:22
+    # location: Austin DC, rack 4, U12
 
 $ rustorm search zzz
 no results found.
@@ -1156,9 +1318,10 @@ color = "auto"
 | 1 | The operation could not be applied: host not found, name taken, invalid URI or pattern, nothing matched, problems found, confirmation declined. |
 | 2 | Usage error: unknown command, missing or extra arguments, bad flag. |
 | 3 | The config file could not be read, parsed or written. |
+| 4 | A key named in `--filter` is not set on a host that was printed (D27). The output is complete; a warning names each host and key. `--allow-missing` turns this into 0. |
 
-Errors go to stderr prefixed `error: `. Success messages go to stdout and `-q` silences them.
+Errors go to stderr prefixed `error: `. Success messages go to stdout and `-q` silences them. When more than one code applies, the lowest nonzero code wins: a missing host (1) is reported before a missing key (4).
 
 ## Shell completion
 
-`rustorm completion <shell>` prints the script. Completion of host-name arguments calls `rustorm list -n`, so it reflects the file at the moment you press Tab.
+`rustorm completion <shell>` prints the script. Completion of host-name arguments calls `rustorm list -n`, so it reflects the file at the moment you press Tab. The value of `--filter` and the key part of `--where` complete to the ssh_config keywords, the metadata keys and the pseudo-keys `Host`, `section` and `file`; `--format` completes to its four names and `yml`.

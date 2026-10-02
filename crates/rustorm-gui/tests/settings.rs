@@ -423,6 +423,62 @@ fn gui_walkthrough_evidence() {
     .unwrap();
     writeln!(out, "--- editor buffer\n{}", h.state().editor_text()).unwrap();
 
+    // Host metadata: a tagged host's Notes & location group, chips and the
+    // summary in the detail panel; a plain host gains a location through
+    // Add setting.
+    std::fs::write(
+        d.join("cypress"),
+        "# note: Primary build box\n# location: Austin DC, rack 4\n# tags: prod, db\nHost cypressMelissa\n    HostName 192.168.144.130\n\nHost plainbox\n    HostName 10.0.0.9\n",
+    )
+    .unwrap();
+    let mut h = harness(&root);
+    h.run();
+    click(&mut h, "cypressMelissa");
+    click(&mut h, "All settings");
+    writeln!(out, "\n--- metadata, cypressMelissa: filled view {}", keys(&h)).unwrap();
+    writeln!(
+        out,
+        "Notes & location group shown: {}; summary shows location {}, chip prod {}, note {}",
+        h.query_all_by_label("Notes & location").next().is_some(),
+        h.query_all_by_label("Austin DC, rack 4").next().is_some(),
+        h.query_all_by_label("prod").next().is_some(),
+        h.query_all_by_label_contains("Primary build box").next().is_some()
+    )
+    .unwrap();
+    click(&mut h, "prod ×");
+    writeln!(
+        out,
+        "clicked `prod ×`: tags field now {:?}",
+        h.state()
+            .settings()
+            .unwrap()
+            .rows
+            .iter()
+            .find(|r| r.spec.key == "tags")
+            .map(|r| r.value.clone())
+    )
+    .unwrap();
+    click(&mut h, "Save settings");
+    writeln!(out, "Save settings: status {:?}", h.state().status()).unwrap();
+    click(&mut h, "plainbox");
+    // All settings keeps its open state across hosts.
+    type_into(&mut h, "Add setting", "loca");
+    h.key_press(egui::Key::Tab);
+    h.run();
+    h.get_all_by_label("location")
+        .last()
+        .unwrap()
+        .type_text("Dallas");
+    h.run();
+    click(&mut h, "Save settings");
+    writeln!(
+        out,
+        "plainbox: Add setting loca, Tab, Dallas, Save: status {:?}\n--- config.d/cypress after\n{}",
+        h.state().status(),
+        std::fs::read_to_string(d.join("cypress")).unwrap()
+    )
+    .unwrap();
+
     std::fs::write(out_path, out).unwrap();
     assert!(after.contains("ControlMaster auto"));
 }
