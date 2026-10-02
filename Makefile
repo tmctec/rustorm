@@ -96,7 +96,7 @@ fixtures-read: build  ## Regenerate the docs/cli.md Reading output fixtures with
 	@./scripts/make-read-fixtures.sh
 
 .PHONY: test-gui-walkthrough
-test-gui-walkthrough:  ## Drive the GUI follow, settings (filled/all, Add setting) and editor completion flows; write what they show to GUI_WALKTHROUGH
+test-gui-walkthrough:  ## Drive the GUI follow, settings (filled/all, Add setting, Notes & location) and editor completion flows; write what they show to GUI_WALKTHROUGH
 	@RUSTORM_GUI_EVIDENCE=$(abspath $(GUI_WALKTHROUGH)) ./makehelp.sh test -p rustorm-gui --test settings gui_walkthrough -- --ignored
 	@echo "walkthrough written to $(GUI_WALKTHROUGH)"
 
