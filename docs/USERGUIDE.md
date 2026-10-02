@@ -32,6 +32,9 @@ rustorm add vps root@vps.example.com:2222     # new host from a connection URI
 rustorm list                                  # every host, sorted, with user@hostname:port
 rustorm search 'example\.com'                 # regex over names, aliases, keys and values
 rustorm set vps User deploy Port 22           # change keys without restating the URI
+rustorm set vps location "Austin DC" --tag prod   # a note, location or tag, kept as a comment
+rustorm show vps --filter hostname --just-value   # one value, ready for a script
+rustorm list --where tags=prod --format csv   # pick hosts by any key, print csv, json or yaml
 rustorm clone rails01 rails02                 # copy a host; HostName follows the new name
 rustorm move vps --section work               # put a host in a section
 rustorm add-section lab                       # create an empty section
@@ -48,6 +51,35 @@ Shell completion: `rustorm completion zsh > ~/.zfunc/_rustorm` (also `bash`, `fi
 ## Sections
 
 A section groups hosts under a banner comment in the config file; ssh ignores the banner. Use `--section NAME` on `add`, `edit`, `clone` or `move`. The first section you create also creates a catch-all section named `other` for every host not yet under a banner. Hosts inside a section stay in alphabetical order, the catch-all stays last, and `rustorm rename-section other personal` renames it while keeping that role. `rustorm sections` lists them with host counts. `rustorm add-section lab` creates an empty section (`--before work` places it in front of `work`); on a file with no sections it also creates the catch-all.
+
+## Notes, locations and tags
+
+ssh_config has no field for a note, so rustorm keeps them as comments directly above the host, where ssh ignores them and any editor shows them:
+
+```
+# note: Primary build box
+# location: Austin DC, rack 4
+# privateKeyLocation: keepassxc
+# tags: prod, db
+Host buildbox
+    HostName 10.0.4.12
+```
+
+The five keys are `note` (as many lines as you like), `location`, `privateKeyLocation` (where the key lives, never the key itself), `other` and `tags` (a comma-separated list). Set them like any other key — `rustorm set buildbox note "Reboot after 18:00" location "Austin DC"` — and add or drop tags with `--tag prod` and `--untag prod`. `unset buildbox note` removes them. `search` matches them and prints the matching line under the host; the terminal UI shows them in the status line and both UIs edit them in the settings form's Notes & location group. Full rules: `docs/cli.md`, Host metadata.
+
+## Reading one value, or a table
+
+`show`, `list` and `search` can print exactly the keys you ask for, in the format a script wants:
+
+```
+rustorm show D72 --filter hostname --just-value            # 10.7.112.72
+rustorm show D72 --filter Host,hostname,user --format yaml
+rustorm list --section "df austin" --filter Host,hostname --format csv
+rustorm list --where tags=prod --where location~Austin --filter Host,tags
+rustorm show --where tags=db,cache --filter hostname --just-value   # every db or cache host
+```
+
+`--filter` names the keys (ssh keywords, the metadata keys, and `Host`, `section`, `file`); the output holds only those, so leave `Host` out to drop the name. `--where KEY=VALUE` keeps matching hosts (`!=` negates, `~` takes a regular expression, a comma lists alternatives, repeating the flag requires all), and `--section` picks a section. `--format` is `txt`, `json`, `csv` or `yaml` (`yml`); `--json` is `--format json`. A key a host does not set prints empty and the command exits 4 so a script notices; `--allow-missing` makes that 0. Details: `docs/cli.md`, Reading output.
 
 ## Combining config files
 
@@ -107,9 +139,9 @@ rustorm dump --file cypress                             # print one included fil
 | `Esc` | Cancel a form or prompt, or leave the editor |
 | `q` | Quit; asks first if the editor has unsaved edits, listing every unsaved file |
 
-**Settings form.** `Enter` on a host shows the keywords it sets, in six groups: Connection, Authentication, Forwarding, Proxy, Multiplexing and Advanced. `Ctrl-T` shows every keyword. To add one, go to the `Add setting` row at the bottom and start typing its name — `hostk` offers `HostKeyAlias` — then `Tab` to its value. Yes/no and fixed-choice keys such as `Compression` or `ControlMaster` change with `Space` or the arrow keys, including back to not set. Other keys are typed. `Ctrl-U` clears one. Values your `Host *` block supplies show dimmed. `Enter` checks each value (a port must be a number, `StrictHostKeyChecking` one of its documented words) and saves every change at once with a backup; `Esc` cancels.
+**Settings form.** `Enter` on a host shows the keywords it sets, in seven groups: Notes & location (the note, location, privateKeyLocation, other and tags comments), Connection, Authentication, Forwarding, Proxy, Multiplexing and Advanced. `Ctrl-T` shows every keyword. To add one, go to the `Add setting` row at the bottom and start typing its name — `hostk` offers `HostKeyAlias` — then `Tab` to its value. Yes/no and fixed-choice keys such as `Compression` or `ControlMaster` change with `Space` or the arrow keys, including back to not set. Other keys are typed. `Ctrl-U` clears one. Values your `Host *` block supplies show dimmed. `Enter` checks each value (a port must be a number, `StrictHostKeyChecking` one of its documented words) and saves every change at once with a backup; `Esc` cancels.
 
-Every table column sorts and filters, including proxy (`ProxyCommand`) and jump (`ProxyJump`). Hosts without the sorted key sort last. Filters combine: a section filter and a user filter together show only hosts matching both. With included files the table gains a file column and the editor keeps one buffer per file; `Ctrl-S` saves only the file shown. Full key list: `docs/tui.md`.
+Every table column sorts and filters, including proxy (`ProxyCommand`) and jump (`ProxyJump`). Hosts without the sorted key sort last. Filters combine: a section filter and a user filter together show only hosts matching both. The `/` filter also matches a host's note, location and tags, and the status line shows them for the selected host. With included files the table gains a file column and the editor keeps one buffer per file; `Ctrl-S` saves only the file shown. Full key list: `docs/tui.md`.
 
 ## Desktop window
 
@@ -117,7 +149,8 @@ Every table column sorts and filters, including proxy (`ProxyCommand`) and jump 
 
 - Click a column header to sort; click again to reverse. The filter box above each column narrows the rows, and filters combine.
 - Select a row, or move with `↑` `↓`, to edit it in the detail panel: name, connection URI, identity file and section. Clearing the identity file removes it from the host. Save writes the file; Delete asks first. The Editor tab follows the selection, opening on the selected host's `Host` line.
-- **All settings** in the detail panel shows the keywords the host sets, grouped the same way as the terminal UI; switch to **All** for every keyword, or type a name into **Add setting** and press Tab. Yes/no and fixed-choice keys are drop-downs, other keys are text fields, repeatable keys like `LocalForward` get a field per value, and a bad value is flagged under its field. **Save settings** writes every change at once.
+- **All settings** in the detail panel shows the keywords the host sets, grouped the same way as the terminal UI; switch to **All** for every keyword, or type a name into **Add setting** and press Tab. Yes/no and fixed-choice keys are drop-downs, other keys are text fields, repeatable keys like `LocalForward` get a field per value, and a bad value is flagged under its field. The Notes & location group edits the host's note, location and tags; tags show as chips with × to remove and a ▾ menu of the tags in use. **Save settings** writes every change at once.
+- A host's location, tags and notes also show under the Edit host heading, and the filter box above the table matches them.
 - Add opens the same form empty. Clone and Move to section act on the selected host.
 - New section… under the sidebar creates an empty section; on a file without sections it also creates the catch-all. With a section selected, Rename section… renames it, or merges it into a section that already has the new name.
 - With included files the sidebar lists every file with its host count, the table gains a file column, and the editor has a file selector; Save writes only the selected file. Show in Editor on a host opens its file at its `Host` line. Quitting with several unsaved files lists them in one dialog with Save All.
@@ -125,7 +158,7 @@ Every table column sorts and filters, including proxy (`ProxyCommand`) and jump 
 
 ## The embedded editor
 
-While you type a keyword at the start of a line the editor suggests the rest in dim text; Space accepts it and fills in the usual value, selected so you can type over it (`por` Space gives `Port 22`). Ctrl-Space on a `yes`/`no` or fixed-choice value swaps it.
+While you type a keyword at the start of a line the editor suggests the rest in dim text; Space accepts it and fills in the usual value, selected so you can type over it (`por` Space gives `Port 22`). In a comment the same works for the metadata keys: `# lo` Space gives `# location: `. Ctrl-Space on a `yes`/`no` or fixed-choice value swaps it.
 
 Both UIs include an editor for the raw config file with syntax highlighting: comments, section banners, `Host` lines, keys, values, and `ProxyCommand` and `ProxyJump` in their own colors. Saving writes through the same engine as the CLI, so a backup is made, untouched lines stay byte for byte, and sections are re-sorted. An edit that would break the file, such as a `Host` line with no name, is refused with its line number. If the file changed on disk while you were editing, the UI reloads it before applying your change; if the same host changed on both sides it asks which version to keep. Quitting with unsaved edits asks whether to save or discard. With included files the editor holds one buffer per file and saves them one at a time, each with its own backup.
 

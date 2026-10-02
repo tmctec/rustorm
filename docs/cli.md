@@ -296,7 +296,7 @@ rustorm search <PATTERN>  [-s NAME] [--where KEY=VALUE]... [--filter KEYS] [--fo
 
 **`--filter KEYS`** picks the keys to print, comma-separated, in the order given. The output holds exactly these keys and nothing else: leave `Host` out and no name is printed. Without `--filter`, `txt` and `json` print the command's usual output (`list` and `search` the rows, `show` the entries); `csv` and `yaml` use the keys `Host,hostname,user,port,section,file`.
 
-**`--format FMT`** is `txt` (the default), `json`, `csv` or `yaml`; `yml` is an alias of `yaml`. `--json` is `--format json`; naming both with different formats is a usage error, exit 2.
+**`--format FMT`** is `txt` (the default), `json`, `csv` or `yaml`; `yml` names the same format as `yaml`. `--json` is `--format json`; naming both with different formats is a usage error, exit 2.
 
 | Format | With `--filter` | With `--just-value` |
 |---|---|---|
