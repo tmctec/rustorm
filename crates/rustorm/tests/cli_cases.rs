@@ -211,7 +211,8 @@ fn json_list_rows_carry_section() {
     assert!(rows.iter().all(|r| r.get("section").is_some()));
     assert_eq!(rows[0]["section"], "data foundry");
     let keys: Vec<&String> = rows[0].as_object().unwrap().keys().collect();
-    assert_eq!(keys.len(), 8);
+    assert_eq!(keys.len(), 9);
+    assert_eq!(rows[0]["meta"], serde_json::json!({}));
     // D23: every row names its file, on a workspace of one file too.
     assert!(rows.iter().all(|r| r["file"] == c));
     for cmd in [

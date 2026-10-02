@@ -180,7 +180,7 @@ lab-1            -> travis@10.30.0.5:22
     assert_eq!(
         json,
         format!(
-            "{{\"name\":\"github\",\"file\":\"{}\",\"section\":null,\"aliases\":[],\"hostname\":\"github.com\",\"user\":\"git\",\"port\":22,\"options\":{{}}}}",
+            "{{\"name\":\"github\",\"file\":\"{}\",\"section\":null,\"aliases\":[],\"hostname\":\"github.com\",\"user\":\"git\",\"port\":22,\"options\":{{}},\"meta\":{{}}}}",
             home.path(".ssh/config").display()
         )
     );

@@ -540,7 +540,7 @@ fn list_row_serializes_with_documented_field_names() {
     let json = serde_json::to_string(&c.list(&env())[0]).unwrap();
     assert_eq!(
         json,
-        r#"{"name":"db1","section":null,"aliases":["d"],"hostname":"db1.example.com","user":"postgres","port":22,"options":{"IdentityFile":["a","b"],"ProxyCommand":"ssh -W %h:%p x"},"proxy_command":"ssh -W %h:%p x","proxy_jump":null}"#
+        r#"{"name":"db1","section":null,"aliases":["d"],"hostname":"db1.example.com","user":"postgres","port":22,"options":{"IdentityFile":["a","b"],"ProxyCommand":"ssh -W %h:%p x"},"proxy_command":"ssh -W %h:%p x","proxy_jump":null,"meta":{}}"#
     );
     let docs_row = cfg(&sectioned()).list(&env())[0].clone();
     let v: serde_json::Value = serde_json::to_value(&docs_row).unwrap();

@@ -11,6 +11,7 @@
 //! - [`io`]: loading, backups and atomic writes.
 //! - [`include`](mod@include): `Include` resolution the way ssh reads it.
 //! - [`keyspec`]: the value type and form group of every keyword.
+//! - [`meta`]: the `# key: value` metadata comments above a host.
 //! - [`ops`]: one method on [`Config`] per `rustorm` command.
 //! - [`workspace`]: the root and its included files as one [`Workspace`],
 //!   with every command routed to the file it changes.
@@ -27,6 +28,7 @@ pub mod io;
 pub mod keys;
 pub mod keyspec;
 pub mod lexer;
+pub mod meta;
 pub mod model;
 pub mod ops;
 pub mod uri;
@@ -53,6 +55,7 @@ pub use keyspec::{
     SettingRow, SettingsDraft,
 };
 pub use lexer::{lex, lex_document, lex_line, Lexer, Span, SpanKind};
+pub use meta::{is_meta_key, parse_meta_line, split_tags, validate_meta, HostMeta, MetaKey};
 pub use model::{
     Banner, Config, Directive, DirectiveParts, Entry, HostBlock, HostLocation, Line, MatchBlock,
     Section,
