@@ -1,5 +1,13 @@
 # Releases
 
+## 2026-10-03 — Clean up backups and duplicate hosts, one host at a time
+
+**New**
+- If an `Include` wildcard is loading old backups, ssh may be reading a host from a file you forgot about. `rustorm reconcile --list` shows every host defined in two files, which copies match and which really differ, with a diff for each difference.
+- Decide each real difference on its own: keep the version ssh uses now, take the other one, or pick setting by setting. Matching copies go in one step with `--drop-identical`.
+- When a backup has nothing left to decide, `--retire` moves it to `~/.ssh/retired/`, out of the way of your config. Nothing is ever deleted, and every file is backed up before it changes.
+- The terminal UI (press `C`) and the desktop app (**Conflicts…** in the sidebar) show the two versions side by side and do the same thing with a key or a click.
+
 ## 2026-10-02 — Notes, locations and tags for your hosts, and output you can script
 
 **New**

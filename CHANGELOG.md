@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here. Format follows [Keep a Changelog](https://keepachangelog.com).
 
+## [gannet] - 2026-10-03
+
+### Added
+- `rustorm reconcile` (alias `resolve`, D28–D31, F-61): pairs every host defined in two or more workspace files into a live definition (the one ssh reads first, by `Include` position) and a copy; classifies each as identical (directives and metadata equal, comments and spacing ignored), conflict, or — with `FILE...` — orphan. `--list` / `--json` report with a unified diff per conflict; on a terminal each conflict shows both blocks side by side and asks live / copy / key by key / skip / quit. Flags `--take-copy`, `--keep-live`, `--add`, `--all-live`, `--all-copy`, `--drop-identical`, `--retire` (moves a fully resolved copy to `~/.ssh/retired/`, mode 0700; never deletes). Exit 1 while conflicts remain.
+- rustorm-core `reconcile` module: `Workspace::reconcile_report`, `apply_decisions` (take-copy keeps the live `Host` line, section and position), `retire_blockers`, `retire`; `Decision`, `Pair`, `KeyDiff`; stale-block refusal.
+- rustorm-tui: `C` opens a Conflicts view on a workspace of several files — side by side, `l`/`c`/`k`/`a`/`s`, `D` drop identical, `R` retire after `[y/N]`; metadata-only conflicts marked "labels only".
+- rustorm-gui: sidebar `Conflicts…  N` and a Conflicts dialog — side by side with highlighted differences, Keep live / Take copy / per-key / Skip, Drop identical, Retire with Add / Leave out on orphan blockers.
+- Tests: core rec-1..15, CLI rcl-1..13, TUI rct-1..10, GUI rcg-1..9, parity par-16..18 (CLI binary, TUI, GUI and core trees byte-equal, retired file included); `make test-reconcile`; docs/cli.md reconcile examples run from fixtures.
+
+### Fixed
+- `reconcile`'s terminal prompt reads the files again before applying answers, so a copy changed while the prompt waited is refused instead of written.
+
+### Changed
+- rustorm-tui: the table help bar on a workspace of several files drops `n:new section` to stay within 150 columns (still in the sections bar and the `?` overlay).
+- docs: USERGUIDE "Cleaning up backups and duplicate hosts"; tui.md and gui.md Conflicts; `C` in the key tables.
+
 ## [anemone] - 2026-10-02
 
 ### Added
