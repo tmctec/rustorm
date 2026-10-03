@@ -188,6 +188,45 @@ pub enum Error {
         reason: String,
     },
 
+    /// `reconcile` naming a host that no two workspace files define.
+    #[error("{0} is not defined in two workspace files.")]
+    NotDuplicated(String),
+
+    /// `reconcile` naming a host with copies in two files and no `FILE`.
+    #[error("{host} has copies in {}. Name the copy as FILE.", join_and(.files))]
+    AmbiguousCopy {
+        /// The host as given.
+        host: String,
+        /// The files holding the copies, as text output prints them.
+        files: Vec<String>,
+    },
+
+    /// A `reconcile` decision that does not fit the pair.
+    #[error("{host} {reason}.")]
+    Undecidable {
+        /// The pair's name.
+        host: String,
+        /// Why, e.g. `is an orphan; add it or leave it out`.
+        reason: String,
+    },
+
+    /// A `reconcile` decision for a block that changed since the report.
+    #[error("{0} changed since the report; reconcile again.")]
+    ReconcileStale(String),
+
+    /// `reconcile --retire` naming the root config.
+    #[error("{0} is the root config and never retires.")]
+    RetireRoot(String),
+
+    /// `reconcile --retire` on a copy that still holds undecided hosts.
+    #[error("{file} not retired; undecided: {}.", .remaining.join(", "))]
+    RetireUnresolved {
+        /// The copy, as text output prints paths.
+        file: String,
+        /// `lab-1 (conflict)`, `printer (orphan)`, `github (read here first)`.
+        remaining: Vec<String>,
+    },
+
     /// rustorm's own TOML config does not parse.
     #[error("invalid rustorm config {path}: {reason}")]
     UserConfig {
@@ -224,12 +263,18 @@ impl Error {
             | Error::HostExistsIn { .. }
             | Error::AmbiguousSection { .. }
             | Error::AmbiguousFile { .. }
-            | Error::UnknownFile(_) => 1,
+            | Error::UnknownFile(_)
+            | Error::ReconcileStale(_)
+            | Error::RetireRoot(_)
+            | Error::RetireUnresolved { .. } => 1,
             Error::MoveNeedsTarget
             | Error::InvalidPattern { .. }
             | Error::OddKeyValues
             | Error::InvalidOption(_)
-            | Error::Usage(_) => 2,
+            | Error::Usage(_)
+            | Error::NotDuplicated(_)
+            | Error::AmbiguousCopy { .. }
+            | Error::Undecidable { .. } => 2,
             Error::Read { .. }
             | Error::Write { .. }
             | Error::UserConfig { .. }
