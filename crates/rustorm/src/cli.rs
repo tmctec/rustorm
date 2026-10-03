@@ -22,7 +22,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_backup: bool,
 
-    /// Emit JSON on list, show, dump, search, check and includes
+    /// Emit JSON on list, show, dump, search, check, includes and reconcile
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -310,6 +310,37 @@ pub enum Cmd {
     Check,
     /// List the Include lines, the files they load and their host counts
     Includes,
+    /// Resolve hosts defined in two or more workspace files
+    #[command(visible_alias = "resolve")]
+    Reconcile {
+        /// Only the copies in these workspace files (a loaded file's name or a path)
+        #[arg(value_name = "FILE")]
+        files: Vec<String>,
+        /// Print the report; decide nothing
+        #[arg(long)]
+        list: bool,
+        /// Take the copy for HOST (repeatable)
+        #[arg(long, value_name = "HOST")]
+        take_copy: Vec<String>,
+        /// Keep the live definition of HOST, or leave the orphan HOST out (repeatable)
+        #[arg(long, value_name = "HOST")]
+        keep_live: Vec<String>,
+        /// Move the orphan HOST into the root or the --file target (repeatable)
+        #[arg(long, value_name = "HOST")]
+        add: Vec<String>,
+        /// Keep the live definition of every other conflict
+        #[arg(long)]
+        all_live: bool,
+        /// Take the copy of every other conflict
+        #[arg(long)]
+        all_copy: bool,
+        /// Remove every identical copy from its file
+        #[arg(long)]
+        drop_identical: bool,
+        /// Move each named FILE to ~/.ssh/retired/ once fully resolved
+        #[arg(long)]
+        retire: bool,
+    },
     /// Print a shell completion script
     Completion {
         /// Shell
@@ -345,6 +376,7 @@ impl Cmd {
             Cmd::Backup { .. } => "backup",
             Cmd::Check => "check",
             Cmd::Includes => "includes",
+            Cmd::Reconcile { .. } => "reconcile",
             Cmd::Completion { .. } => "completion",
             Cmd::Version => "version",
         }
@@ -365,7 +397,8 @@ impl Cmd {
     }
 
     /// True when the command takes `-f, --file`: the writes (the host
-    /// edits pick which definition to change with it) and `dump`.
+    /// edits pick which definition to change with it), `dump`, and
+    /// `reconcile` (the `--add` destination).
     pub fn takes_file(&self) -> bool {
         matches!(
             self,
@@ -382,6 +415,7 @@ impl Cmd {
                 | Cmd::AddSection { .. }
                 | Cmd::RenameSection { .. }
                 | Cmd::Dump
+                | Cmd::Reconcile { .. }
         )
     }
 }

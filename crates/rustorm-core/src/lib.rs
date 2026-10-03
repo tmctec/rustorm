@@ -17,6 +17,8 @@
 //! - [`ops`]: one method on [`Config`] per `rustorm` command.
 //! - [`workspace`]: the root and its included files as one [`Workspace`],
 //!   with every command routed to the file it changes.
+//! - [`reconcile`](mod@reconcile): hosts defined in two or more files,
+//!   paired live against copy, decided, and retired copies.
 //! - [`userconfig`]: rustorm's own TOML config (command aliases, defaults).
 //! - [`Error`]: one error type with CLI messages and exit codes.
 #![warn(missing_docs)]
@@ -34,6 +36,7 @@ pub mod meta;
 pub mod model;
 pub mod ops;
 pub mod projection;
+pub mod reconcile;
 pub mod uri;
 pub mod userconfig;
 pub mod workspace;
@@ -71,6 +74,10 @@ pub use ops::{
 pub use projection::{
     completion_keys, csv_field, missing, parse_filter, project, render, resolve, selected,
     yaml_scalar, Cell, Format, HostView, Projected, Value, Where, WhereOp,
+};
+pub use reconcile::{
+    key_diffs, normalized_lines, remaining_message, same_definition, unified_diff, Applied,
+    BlockRef, Decision, KeyDiff, KeyPick, Pair, PairKind, Pick, ReconcileReport, Retired,
 };
 pub use uri::ConnectionUri;
 pub use userconfig::{ColorMode, UserConfig, UserDefaults};

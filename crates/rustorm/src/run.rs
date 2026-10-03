@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use rustorm_core::{
     combine as core_combine, missing, pair_up, parse_filter, parse_option, project, render,
     resolve_config_path, selected, write_text, AddSpec, Change, CloneSpec, CombineInput,
-    CombineReport, ConfigFile, EditSpec, Env, Error, Format, HostSelector, IncludeMatch,
-    IncludeStatus, ListRow, OnConflict, Projected, Result, UserConfig, Where, Workspace,
-    WorkspaceRow, WriteOptions,
+    CombineReport, ConfigFile, Decision, EditSpec, Env, Error, Format, HostSelector, IncludeMatch,
+    IncludeStatus, KeyPick, ListRow, OnConflict, Pair, PairKind, Pick, Projected, ReconcileReport,
+    Result, UserConfig, Where, Workspace, WorkspaceRow, WriteOptions,
 };
 use serde::Serialize;
 
@@ -302,6 +302,30 @@ pub fn run(cli: &Cli, command: &Cmd, user: &UserConfig, color: bool) -> Result<i
         Cmd::Backup { file } => backup(&ctx, file.as_deref()),
         Cmd::Check => check(&ctx),
         Cmd::Includes => includes(&ctx),
+        Cmd::Reconcile {
+            files,
+            list,
+            take_copy,
+            keep_live,
+            add,
+            all_live,
+            all_copy,
+            drop_identical,
+            retire,
+        } => reconcile(
+            &ctx,
+            files,
+            &ReconcileFlags {
+                list: *list,
+                take_copy,
+                keep_live,
+                add,
+                all_live: *all_live,
+                all_copy: *all_copy,
+                drop_identical: *drop_identical,
+                retire: *retire,
+            },
+        ),
         Cmd::Completion { .. } | Cmd::Version => unreachable!("handled above"),
     }
 }
@@ -1002,4 +1026,278 @@ fn includes(ctx: &Ctx) -> Result<i32> {
     ));
     out::stdout(&text);
     Ok(0)
+}
+
+/// The decision flags of `reconcile`.
+struct ReconcileFlags<'a> {
+    list: bool,
+    take_copy: &'a [String],
+    keep_live: &'a [String],
+    add: &'a [String],
+    all_live: bool,
+    all_copy: bool,
+    drop_identical: bool,
+    retire: bool,
+}
+
+impl ReconcileFlags<'_> {
+    /// True when a flag decides something (`--retire` included).
+    fn decides(&self) -> bool {
+        self.has_decision() || self.retire
+    }
+
+    /// True when a host flag or a bulk flag is given.
+    fn has_decision(&self) -> bool {
+        !self.take_copy.is_empty()
+            || !self.keep_live.is_empty()
+            || !self.add.is_empty()
+            || self.all_live
+            || self.all_copy
+            || self.drop_identical
+    }
+}
+
+/// The per-host and bulk flags as one decision per report item, in item
+/// order. A host decided twice is a usage error.
+fn flag_decisions(
+    report: &ReconcileReport,
+    flags: &ReconcileFlags,
+) -> Result<Vec<(usize, Decision)>> {
+    let mut decisions: Vec<(usize, Decision)> = Vec::new();
+    let named = [
+        (flags.take_copy, Decision::TakeCopy),
+        (flags.keep_live, Decision::KeepLive),
+        (flags.add, Decision::Add),
+    ];
+    for (hosts, decision) in named {
+        for host in hosts {
+            let i = report.lookup(host)?;
+            if decisions.iter().any(|(d, _)| *d == i) {
+                return Err(Error::Usage(format!(
+                    "{} is decided twice.",
+                    report.items[i].name
+                )));
+            }
+            decisions.push((i, decision.clone()));
+        }
+    }
+    let bulk = [
+        (flags.all_live, PairKind::Conflict, Decision::KeepLive),
+        (flags.all_copy, PairKind::Conflict, Decision::TakeCopy),
+        (
+            flags.drop_identical,
+            PairKind::Identical,
+            Decision::DropIdentical,
+        ),
+    ];
+    for (on, kind, decision) in bulk {
+        if on {
+            let more = report.bulk(kind, &decision, &decisions);
+            decisions.extend(more);
+        }
+    }
+    decisions.sort_by_key(|(i, _)| *i);
+    Ok(decisions)
+}
+
+/// One answer read from stdin, lowercased; `None` at end of input.
+fn read_answer() -> Result<Option<String>> {
+    let mut answer = String::new();
+    let n = std::io::stdin()
+        .lock()
+        .read_line(&mut answer)
+        .map_err(|e| Error::Usage(format!("cannot read the answer: {e}")))?;
+    Ok((n > 0).then(|| answer.trim().to_ascii_lowercase()))
+}
+
+/// Asks `prompt` until the answer's first letter is one of `choices`.
+/// End of input answers `q`.
+fn ask(prompt: &str, choices: &[char]) -> Result<char> {
+    loop {
+        out::stderr(&format!("{prompt} "));
+        let Some(answer) = read_answer()? else {
+            out::stderr("\n");
+            return Ok('q');
+        };
+        if let Some(c) = answer.chars().next().filter(|c| choices.contains(c)) {
+            return Ok(c);
+        }
+    }
+}
+
+/// The live block on the left, the copy on the right, each under its
+/// file's label.
+fn side_by_side(pair: &Pair) -> String {
+    let live = pair.live.as_ref().expect("a conflict has a live side");
+    let left: Vec<String> = std::iter::once(format!("{} (live)", live.label))
+        .chain(live.text.lines().map(str::to_string))
+        .collect();
+    let right: Vec<String> = std::iter::once(format!("{} (copy)", pair.copy.label))
+        .chain(pair.copy.text.lines().map(str::to_string))
+        .collect();
+    let width = left.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let mut text = String::new();
+    for row in 0..left.len().max(right.len()) {
+        let l = left.get(row).map_or("", String::as_str);
+        let r = right.get(row).map_or("", String::as_str);
+        let line = format!("{l:<width$} | {r}");
+        text.push_str(line.trim_end());
+        text.push('\n');
+    }
+    text
+}
+
+fn values(v: &[String]) -> String {
+    if v.is_empty() {
+        "(unset)".to_string()
+    } else {
+        v.join(", ")
+    }
+}
+
+/// Asks for every conflict, then every orphan, of `report` on the
+/// terminal. `q` stops and keeps the decisions made so far.
+fn ask_decisions(report: &ReconcileReport) -> Result<Vec<(usize, Decision)>> {
+    out::stderr(&format!("{}\n", report.summary()));
+    let mut decisions = Vec::new();
+    for (i, pair) in report.items.iter().enumerate() {
+        let decision = match pair.kind {
+            PairKind::Identical => continue,
+            PairKind::Conflict => {
+                let mut text = format!("\n{}\n", side_by_side(pair));
+                if let Some(note) = &pair.note {
+                    text.push_str(&format!("note: {note}\n"));
+                }
+                out::stderr(&text);
+                let prompt = format!("{}: [l]ive / [c]opy / [k]eys / [s]kip / [q]uit?", pair.name);
+                match ask(&prompt, &['l', 'c', 'k', 's', 'q'])? {
+                    'l' => Decision::KeepLive,
+                    'c' => Decision::TakeCopy,
+                    'k' => {
+                        let mut picks = Vec::new();
+                        for k in &pair.keys {
+                            let prompt = format!(
+                                "  {}: {} (live) / {} (copy)  [l]ive / [c]opy?",
+                                k.key,
+                                values(&k.live),
+                                values(&k.copy)
+                            );
+                            let pick = match ask(&prompt, &['l', 'c', 'q'])? {
+                                'l' => Pick::Live,
+                                'c' => Pick::Copy,
+                                _ => return Ok(decisions),
+                            };
+                            picks.push(KeyPick {
+                                key: k.key.clone(),
+                                pick,
+                            });
+                        }
+                        Decision::Keys(picks)
+                    }
+                    's' => continue,
+                    _ => break,
+                }
+            }
+            PairKind::Orphan => {
+                out::stderr(&format!(
+                    "\norphan: {} in {}\n{}",
+                    pair.name, pair.copy.label, pair.copy.text
+                ));
+                if !pair.copy.text.ends_with('\n') {
+                    out::stderr("\n");
+                }
+                let prompt = format!("{}: [a]dd / [s]kip / [q]uit?", pair.name);
+                match ask(&prompt, &['a', 's', 'q'])? {
+                    'a' => Decision::Add,
+                    's' => continue,
+                    _ => break,
+                }
+            }
+        };
+        decisions.push((i, decision));
+    }
+    Ok(decisions)
+}
+
+/// `reconcile`: report, decide (from flags or on a terminal), save, then
+/// retire each named file.
+fn reconcile(ctx: &Ctx, files: &[String], flags: &ReconcileFlags) -> Result<i32> {
+    if flags.retire && files.is_empty() {
+        return Err(Error::Usage("--retire needs FILE.".to_string()));
+    }
+    if ctx.json && flags.decides() {
+        return Err(Error::Usage(
+            "--json prints the report only; drop it to decide.".to_string(),
+        ));
+    }
+    if flags.list && flags.decides() {
+        return Err(Error::Usage(
+            "--list prints the report only; drop it to decide.".to_string(),
+        ));
+    }
+    if flags.all_live && flags.all_copy {
+        return Err(Error::Usage(
+            "--all-live and --all-copy conflict.".to_string(),
+        ));
+    }
+    let mut ws = ctx.load_read()?;
+    let scope = if files.is_empty() {
+        None
+    } else {
+        Some(ws.reconcile_scope(files)?)
+    };
+    let add_to = match ctx.file() {
+        Some(f) => Some(ws.resolve_file(f)?),
+        None => None,
+    };
+    let report = ws.reconcile_report(scope.as_deref());
+    let listed_code = if report.conflicts > 0 { 1 } else { 0 };
+    if ctx.json {
+        out::line(&to_json(&report));
+        return Ok(listed_code);
+    }
+    let interactive = !flags.list && !flags.has_decision() && stdin_is_terminal();
+    if flags.list || (!flags.decides() && !interactive) {
+        out::stdout(&report.list_text());
+        return Ok(listed_code);
+    }
+    let decisions = if interactive {
+        let asked = ask_decisions(&report)?;
+        // Read again: a block changed on disk while the prompt waited is
+        // refused as stale, never decided blind.
+        ws = ctx.load()?;
+        asked
+    } else {
+        flag_decisions(&report, flags)?
+    };
+    let mut decided = Vec::new();
+    if interactive || !decisions.is_empty() {
+        let change = ws.apply_decisions(&report, &decisions, add_to)?;
+        decided = ctx.finish(&mut ws, change)?.decided;
+    }
+    if flags.retire {
+        let targets: Vec<PathBuf> = scope
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|&i| ws.abs(i))
+            .collect();
+        for (n, path) in targets.iter().enumerate() {
+            if n > 0 {
+                ws = ctx.load()?;
+            }
+            let Some(i) = (0..ws.files.len()).find(|&i| ws.abs(i) == *path) else {
+                continue;
+            };
+            let change = ws.retire(i, &decided, ctx.write)?;
+            for m in &change.messages {
+                ctx.say(m);
+            }
+        }
+    }
+    Ok(if report.remaining(&decisions) > 0 {
+        1
+    } else {
+        0
+    })
 }

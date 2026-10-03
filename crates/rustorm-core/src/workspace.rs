@@ -184,7 +184,7 @@ fn plural(n: usize, word: &str) -> String {
     }
 }
 
-fn same_file(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     absolute_path(a) == absolute_path(b) || canonical(a) == canonical(b)
 }
 
@@ -573,13 +573,13 @@ impl Workspace {
         }
     }
 
-    fn touch(&mut self, i: usize) {
+    pub(crate) fn touch(&mut self, i: usize) {
         if !self.write_order.contains(&i) {
             self.write_order.push(i);
         }
     }
 
-    fn change<T>(
+    pub(crate) fn change<T>(
         &mut self,
         value: T,
         files: Vec<usize>,
