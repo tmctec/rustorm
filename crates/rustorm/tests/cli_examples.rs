@@ -104,6 +104,17 @@ fn plan(heading: &str) -> Option<Vec<Step>> {
             (f("includes-empty"), 0),
             (f("list-flat"), 0),
         ],
+        // The reconcile workspace (config.d/cypress and config.d/cypress.bak
+        // seeded by [`extra_files`]); each command continues from the last.
+        "reconcile" => vec![
+            (f("reconcile-root"), 1),
+            (None, 1),
+            (None, 0),
+            (None, 1),
+            (None, 1),
+            (None, 0),
+            (None, 2),
+        ],
         "completion" => vec![(f("empty"), 0)],
         "version" => vec![(f("empty"), 0)],
         _ => return None,
@@ -125,6 +136,10 @@ fn extra_files(heading: &str) -> Vec<(&'static str, &'static str)> {
             ("includes-lab", "ranch.d/lab"),
         ],
         "Reading output" => vec![("read-df-austin", "config.d/df-austin")],
+        "reconcile" => vec![
+            ("reconcile-cypress", "config.d/cypress"),
+            ("reconcile-cypress-bak", "config.d/cypress.bak"),
+        ],
         _ => Vec::new(),
     }
 }
@@ -483,7 +498,7 @@ fn every_cli_md_example_matches() {
     );
     assert_eq!(
         blocks.len(),
-        24,
+        25,
         "docs/cli.md has one Examples block per command, plus Reading output"
     );
     assert!(

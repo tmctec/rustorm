@@ -1263,7 +1263,7 @@ Each pair is one of:
 
 **Listing.** `--list` prints `N conflicts, M identical, K orphans across F files`, where `F` counts the files holding a pair or an orphan, then a unified diff per conflict, live first, over the normalized block (metadata lines, the `Host` line, one line per directive), then one `orphan: <host> in <file>` line per orphan. A blank line separates the diffs. Listing is what `reconcile` does off a terminal when no decision is given. `--json` prints the report as one object, `{"conflicts": N, "identical": M, "orphans": K, "files": F, "items": [...]}`; each item carries `name`, `names` (every name the pair shares), `kind`, `live` and `copy` (each `{"file", "line", "section", "text"}`, `live` `null` for an orphan), `live_is_backup`, `note`, `keys` (each differing key with its `live` and `copy` values) and `diff`. `--json` applies nothing; given with a decision it is a usage error.
 
-**On a terminal**, without a decision, each conflict prints its two blocks side by side, live on the left, and asks `[l]ive / [c]opy / [k]eys / [s]kip / [q]uit`. `k` asks once per differing key, `[l]ive / [c]opy`, and builds the result from the picks. With `FILE...` each orphan asks `[a]dd / [s]kip / [q]uit`. `q` stops asking and applies the decisions made so far.
+**On a terminal**, without a decision, each conflict prints its two blocks side by side, live on the left, and asks `[l]ive / [c]opy / [k]eys / [s]kip / [q]uit`. `k` asks once per differing key, `[l]ive / [c]opy`, and builds the result from the picks. With `FILE...` each orphan asks `[a]dd / [s]kip / [q]uit`. `q`, or the end of input, stops asking and applies the decisions made so far. The blocks and prompts go to stderr, the messages to stdout. With `--retire` the questions come first.
 
 **Decisions** without a terminal:
 
@@ -1284,7 +1284,7 @@ A host flag repeats for several hosts. A host with copies in two files needs the
 
 | Option | Effect |
 |---|---|
-| `--list` | Print the report; decide nothing. |
+| `--list` | Print the report; decide nothing. Given with a decision it is a usage error. |
 | `--take-copy <HOST>` | Take the copy for `HOST`. Repeatable. |
 | `--keep-live <HOST>` | Keep the live definition of `HOST`, or leave the orphan `HOST` out. Repeatable. |
 | `--add <HOST>` | Move the orphan `HOST` into the root or the `--file` target. Repeatable. |
@@ -1352,7 +1352,7 @@ error: nas is not defined in two workspace files.
 
 **Exit status**
 
-0 no conflict in scope left undecided · 1 conflicts remain, or a `--retire` refused · 2 usage: an unknown or undecidable host, `--retire` without `FILE`, `--json` with a decision, `--all-live` with `--all-copy` · 3 a file unreadable, unwritable or not movable.
+0 no conflict in scope left undecided · 1 conflicts remain, or a `--retire` refused · 2 usage: an unknown or undecidable host, a host decided twice, `--retire` without `FILE`, `--json` or `--list` with a decision, `--all-live` with `--all-copy` · 3 a file unreadable, unwritable or not movable.
 
 ### completion
 

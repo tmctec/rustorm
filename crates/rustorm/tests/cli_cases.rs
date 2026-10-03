@@ -1001,3 +1001,476 @@ fn inc_17_every_json_row_carries_its_file() {
     let shown = json(&["--json", "show", "lab-1"]);
     assert_eq!(shown[0]["file"], abs("ranch.d/lab"));
 }
+
+// ----- reconcile (docs/cli.md "reconcile"): the docs' workspace under a
+// temp HOME, run without --config -----
+
+/// `~/.ssh/config` (Include `~/.ssh/config.d/*`, github),
+/// `config.d/cypress` (cypressPro, cypressPro-ext, lab-1 with a location)
+/// and `config.d/cypress.bak` (the same three, cypressPro differing, lab-1
+/// without the location, then printer).
+fn reconcile_home() -> Home {
+    let home = Home::new();
+    for (name, rel) in [
+        ("reconcile-root", "config"),
+        ("reconcile-cypress", "config.d/cypress"),
+        ("reconcile-cypress-bak", "config.d/cypress.bak"),
+    ] {
+        let dest = home.path().join(".ssh").join(rel);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::copy(fixture(name), dest).unwrap();
+    }
+    home
+}
+
+/// Runs `args` with `RUSTORM_ASSUME_TTY=1` and `answers` on stdin.
+fn answered(home: &Home, args: &[&str], answers: &str) -> Output {
+    use std::io::Write;
+    let mut child = home
+        .cmd()
+        .env("RUSTORM_ASSUME_TTY", "1")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(answers.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+const CYPRESS_TOOK_COPY: &str =
+    "cypressPro: took the copy from ~/.ssh/config.d/cypress.bak into ~/.ssh/config.d/cypress.\n";
+
+// rcl-1: on a terminal, c takes the copy and l keeps the live block; side by side, live left
+#[test]
+fn rcl_1_prompt_copy_and_live() {
+    let home = reconcile_home();
+    let out = answered(&home, &["reconcile"], "c\nl\n");
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        format!("{CYPRESS_TOOK_COPY}lab-1: kept ~/.ssh/config.d/cypress.\nno conflicts remain.\n")
+    );
+    let e = err(&out);
+    assert!(
+        e.starts_with("2 conflicts, 1 identical, 0 orphans across 2 files\n"),
+        "{e}"
+    );
+    assert!(
+        e.contains("~/.ssh/config.d/cypress (live) | ~/.ssh/config.d/cypress.bak (copy)\n"),
+        "{e}"
+    );
+    assert!(
+        e.contains("    HostName 10.10.0.2         |     HostName 10.10.0.9\n"),
+        "{e}"
+    );
+    assert!(
+        e.contains("cypressPro: [l]ive / [c]opy / [k]eys / [s]kip / [q]uit? "),
+        "{e}"
+    );
+    assert!(
+        ssh_text(&home, "config.d/cypress").contains("Host cypressPro\n    HostName 10.10.0.9\n")
+    );
+    assert!(
+        ssh_text(&home, "config.d/cypress").contains("# location: Austin DC, rack 4\nHost lab-1\n")
+    );
+}
+
+// rcl-2: s skips, q stops; nothing is written and the remaining conflicts exit 1
+#[test]
+fn rcl_2_prompt_skip_quit_and_end_of_input() {
+    let home = reconcile_home();
+    let before = snapshot(&home);
+    for answers in ["s\nq\n", "q\n", "", "x\ns\ns\n"] {
+        let out = answered(&home, &["reconcile"], answers);
+        assert_eq!(out.status.code(), Some(1), "{answers:?}: {}", err(&out));
+        assert_eq!(text(&out), "2 conflicts remain.\n", "{answers:?}");
+    }
+    assert!(changed(&before, &snapshot(&home)).is_empty());
+}
+
+// rcl-3: k asks once per differing key and builds the result from the picks
+#[test]
+fn rcl_3_prompt_keys_per_key() {
+    let home = reconcile_home();
+    let out = answered(&home, &["resolve"], "k\nc\nk\nc\n");
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        "cypressPro: took HostName from ~/.ssh/config.d/cypress.bak into ~/.ssh/config.d/cypress.\n\
+lab-1: took location from ~/.ssh/config.d/cypress.bak into ~/.ssh/config.d/cypress.\n\
+no conflicts remain.\n"
+    );
+    let e = err(&out);
+    assert!(
+        e.contains("  HostName: 10.10.0.2 (live) / 10.10.0.9 (copy)  [l]ive / [c]opy? "),
+        "{e}"
+    );
+    assert!(
+        e.contains("  location: Austin DC, rack 4 (live) / (unset) (copy)  [l]ive / [c]opy? "),
+        "{e}"
+    );
+    let cypress = ssh_text(&home, "config.d/cypress");
+    assert!(cypress.contains("HostName 10.10.0.9"), "{cypress}");
+    assert!(!cypress.contains("# location:"), "{cypress}");
+    // Every key kept live is a plain keep.
+    let home = reconcile_home();
+    let out = answered(&home, &["reconcile"], "k\nl\ns\n");
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out),
+        "cypressPro: kept ~/.ssh/config.d/cypress.\n1 conflict remains.\n"
+    );
+}
+
+// rcl-4: with FILE, an orphan asks [a]dd / [s]kip / [q]uit and a adds it to the root
+#[test]
+fn rcl_4_prompt_adds_an_orphan() {
+    let home = reconcile_home();
+    let out = answered(&home, &["reconcile", "cypress.bak"], "l\nl\na\n");
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        "cypressPro: kept ~/.ssh/config.d/cypress.\nlab-1: kept ~/.ssh/config.d/cypress.\n\
+printer added to ~/.ssh/config from ~/.ssh/config.d/cypress.bak.\nno conflicts remain.\n"
+    );
+    assert!(err(&out).contains("printer: [a]dd / [s]kip / [q]uit? "));
+    assert!(ssh_text(&home, "config").contains("Host printer\n    HostName 192.168.1.20\n"));
+    assert!(!ssh_text(&home, "config.d/cypress.bak").contains("printer"));
+}
+
+// rcl-5: --take-copy and --keep-live decide named hosts; host flags repeat; a decision prints even off a terminal
+#[test]
+fn rcl_5_take_copy_and_keep_live() {
+    let home = reconcile_home();
+    let out = home.run(&[
+        "reconcile",
+        "--take-copy",
+        "cypressPro",
+        "--keep-live",
+        "lab-1",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        format!("{CYPRESS_TOOK_COPY}lab-1: kept ~/.ssh/config.d/cypress.\nno conflicts remain.\n")
+    );
+    assert!(home.path().join(".ssh/config.d/.cypress~").exists());
+    assert!(!home.path().join(".ssh/config.d/.cypress.bak~").exists());
+    let home = reconcile_home();
+    let out = home.run(&[
+        "reconcile",
+        "--take-copy",
+        "cypressPro",
+        "--take-copy",
+        "lab-1",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert!(text(&out).contains("lab-1: took the copy"));
+    let cypress = ssh_text(&home, "config.d/cypress");
+    assert!(!cypress.contains("# location:"), "{cypress}");
+    // -q keeps the messages back, the exit status still counts.
+    let home = reconcile_home();
+    let out = home.run(&["-q", "reconcile", "--keep-live", "lab-1"]);
+    assert_eq!((out.status.code(), text(&out)), (Some(1), String::new()));
+}
+
+// rcl-6: --all-live and --all-copy decide every conflict not named otherwise
+#[test]
+fn rcl_6_all_live_and_all_copy() {
+    let home = reconcile_home();
+    let before = snapshot(&home);
+    let out = home.run(&["reconcile", "--all-live"]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        "cypressPro: kept ~/.ssh/config.d/cypress.\nlab-1: kept ~/.ssh/config.d/cypress.\nno conflicts remain.\n"
+    );
+    assert!(changed(&before, &snapshot(&home)).is_empty());
+    let out = home.run(&["reconcile", "--all-copy", "--keep-live", "lab-1"]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        format!("{CYPRESS_TOOK_COPY}lab-1: kept ~/.ssh/config.d/cypress.\nno conflicts remain.\n")
+    );
+}
+
+// rcl-7: --drop-identical removes only identical copies, leading comments included; the live file is untouched
+#[test]
+fn rcl_7_drop_identical() {
+    let home = reconcile_home();
+    let cypress = ssh_text(&home, "config.d/cypress");
+    let out = home.run(&["reconcile", "--drop-identical"]);
+    assert_eq!(out.status.code(), Some(1), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        "1 identical copy dropped from ~/.ssh/config.d/cypress.bak.\n2 conflicts remain.\n"
+    );
+    assert_eq!(ssh_text(&home, "config.d/cypress"), cypress);
+    let bak = ssh_text(&home, "config.d/cypress.bak");
+    assert!(
+        !bak.contains("cypressPro-ext") && !bak.contains("# old box"),
+        "{bak}"
+    );
+    assert!(
+        bak.contains("Host cypressPro\n") && bak.contains("Host printer\n"),
+        "{bak}"
+    );
+}
+
+// rcl-8: --add moves an orphan into the root, or into the --file target
+#[test]
+fn rcl_8_add_into_root_or_file() {
+    let home = reconcile_home();
+    let out = home.run(&[
+        "reconcile",
+        "cypress.bak",
+        "--add",
+        "printer",
+        "--file",
+        "cypress",
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        "printer added to ~/.ssh/config.d/cypress from ~/.ssh/config.d/cypress.bak.\n2 conflicts remain.\n"
+    );
+    assert!(ssh_text(&home, "config.d/cypress").contains("Host printer\n"));
+    assert!(!ssh_text(&home, "config").contains("printer"));
+    // --keep-live on an orphan leaves it out.
+    let home = reconcile_home();
+    let out = home.run(&["reconcile", "cypress.bak", "--keep-live", "printer"]);
+    assert_eq!(
+        text(&out),
+        "printer: left out; it stays in ~/.ssh/config.d/cypress.bak.\n2 conflicts remain.\n"
+    );
+}
+
+// rcl-9: --json prints the report object and applies nothing
+#[test]
+fn rcl_9_json_shape() {
+    let home = reconcile_home();
+    let before = snapshot(&home);
+    let out = home.run(&["--json", "reconcile", "cypress.bak"]);
+    assert_eq!(out.status.code(), Some(1), "{}", err(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        (&v["conflicts"], &v["identical"], &v["orphans"], &v["files"]),
+        (&2.into(), &1.into(), &1.into(), &2.into())
+    );
+    let items = v["items"].as_array().unwrap();
+    let keys: Vec<&str> = items[0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let mut want = [
+        "name",
+        "names",
+        "kind",
+        "live",
+        "copy",
+        "live_is_backup",
+        "note",
+        "keys",
+        "diff",
+    ];
+    want.sort_unstable();
+    let mut got = keys.clone();
+    got.sort_unstable();
+    assert_eq!(got, want);
+    let ssh = home.path().join(".ssh");
+    let first = &items[0];
+    assert_eq!(first["name"], "cypressPro");
+    assert_eq!(first["kind"], "conflict");
+    assert_eq!(
+        first["live"]["file"],
+        ssh.join("config.d/cypress").display().to_string()
+    );
+    assert_eq!(first["live"]["line"], 1);
+    assert!(first["live"]["section"].is_null());
+    assert!(first["copy"]["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("Host cypressPro\n"));
+    assert_eq!(first["keys"][0]["key"], "HostName");
+    assert_eq!(first["keys"][0]["live"][0], "10.10.0.2");
+    assert_eq!(first["keys"][0]["copy"][0], "10.10.0.9");
+    assert!(first["diff"]
+        .as_str()
+        .unwrap()
+        .starts_with("--- ~/.ssh/config.d/cypress (live)\n"));
+    let kinds: Vec<&str> = items.iter().map(|i| i["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["conflict", "identical", "conflict", "orphan"]);
+    assert!(items[3]["live"].is_null());
+    assert!(changed(&before, &snapshot(&home)).is_empty());
+}
+
+// rcl-10: usage errors exit 2 and write nothing
+#[test]
+fn rcl_10_usage_errors_exit_2() {
+    let home = reconcile_home();
+    let before = snapshot(&home);
+    for (args, message) in [
+        (
+            &["reconcile", "--retire"][..],
+            "error: --retire needs FILE.\n",
+        ),
+        (
+            &["--json", "reconcile", "--take-copy", "cypressPro"],
+            "error: --json prints the report only; drop it to decide.\n",
+        ),
+        (
+            &["reconcile", "--list", "--all-live"],
+            "error: --list prints the report only; drop it to decide.\n",
+        ),
+        (
+            &["reconcile", "--all-live", "--all-copy"],
+            "error: --all-live and --all-copy conflict.\n",
+        ),
+        (
+            &["reconcile", "--take-copy", "nas"],
+            "error: nas is not defined in two workspace files.\n",
+        ),
+        (
+            &[
+                "reconcile",
+                "--take-copy",
+                "cypressPro",
+                "--keep-live",
+                "cypressPro",
+            ],
+            "error: cypressPro is decided twice.\n",
+        ),
+        (
+            &["reconcile", "cypress.bak", "--take-copy", "printer"],
+            "error: printer is an orphan; add it or leave it out.\n",
+        ),
+        (
+            &["reconcile", "--add", "lab-1"],
+            "error: lab-1 is not an orphan; only a host no other file defines is added.\n",
+        ),
+        (
+            &["reconcile", "--take-copy", "cypressPro", "--section", "x"],
+            "error: --section does not apply to reconcile.\n",
+        ),
+        (&["reconcile", "--bogus"], ""),
+    ] {
+        let out = home.run(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", err(&out));
+        if !message.is_empty() {
+            assert_eq!(err(&out), message, "{args:?}");
+        }
+    }
+    assert!(changed(&before, &snapshot(&home)).is_empty());
+}
+
+// rcl-11: --list and listing off a terminal exit 1 while conflicts remain, 0 once none are left
+#[test]
+fn rcl_11_listing_exit_status() {
+    let home = reconcile_home();
+    let listed = home.run(&["reconcile", "--list"]);
+    assert_eq!(listed.status.code(), Some(1));
+    assert!(text(&listed).starts_with("2 conflicts, 1 identical, 0 orphans across 2 files\n--- "));
+    // Off a terminal without a decision, reconcile lists.
+    assert_eq!(text(&home.run(&["reconcile"])), text(&listed));
+    let out = home.run(&["reconcile", "--take-copy", "cypressPro"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out).ends_with("1 conflict remains.\n"));
+    let out = home.run(&["reconcile", "--take-copy", "lab-1"]);
+    assert_eq!(out.status.code(), Some(0));
+    let out = home.run(&["reconcile", "--list"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        text(&out),
+        "0 conflicts, 3 identical, 0 orphans across 2 files\n"
+    );
+}
+
+// rcl-12: --retire is refused while a host is undecided, then moves the file to ~/.ssh/retired/ and the workspace drops it
+#[test]
+fn rcl_12_retire_refused_then_allowed() {
+    let home = reconcile_home();
+    let before = snapshot(&home);
+    let out = home.run(&["reconcile", "cypress.bak", "--retire"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        err(&out),
+        "error: ~/.ssh/config.d/cypress.bak not retired; undecided: cypressPro (conflict), lab-1 (conflict), printer (orphan).\n"
+    );
+    assert!(changed(&before, &snapshot(&home)).is_empty());
+    let out = home.run(&["reconcile", "config", "--retire"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        err(&out).contains("is the root config and never retires."),
+        "{}",
+        err(&out)
+    );
+    let out = home.run(&[
+        "reconcile",
+        "cypress.bak",
+        "--all-live",
+        "--keep-live",
+        "printer",
+        "--retire",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        "cypressPro: kept ~/.ssh/config.d/cypress.\nlab-1: kept ~/.ssh/config.d/cypress.\n\
+printer: left out; it stays in ~/.ssh/config.d/cypress.bak.\nno conflicts remain.\n\
+~/.ssh/config.d/cypress.bak retired to ~/.ssh/retired/cypress.bak.\n"
+    );
+    let retired = home.path().join(".ssh/retired");
+    assert!(retired.join("cypress.bak").is_file());
+    assert!(!home.path().join(".ssh/config.d/cypress.bak").exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&retired).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+    let includes = text(&home.run(&["includes"]));
+    assert!(!includes.contains("cypress.bak"), "{includes}");
+    let out = home.run(&["check"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    // A second copy under the same name gets .1.
+    std::fs::copy(
+        fixture("reconcile-cypress"),
+        home.path().join(".ssh/config.d/cypress.bak"),
+    )
+    .unwrap();
+    let out = home.run(&["reconcile", "cypress.bak", "--retire"]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        "~/.ssh/config.d/cypress.bak retired to ~/.ssh/retired/cypress.bak.1.\n"
+    );
+    assert!(retired.join("cypress.bak.1").is_file());
+}
+
+// rcl-13: a terminal with --retire asks first, then retires what the answers resolved
+#[test]
+fn rcl_13_prompt_then_retire() {
+    let home = reconcile_home();
+    let out = answered(
+        &home,
+        &["reconcile", "cypress.bak", "--retire"],
+        "c\nl\na\n",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert!(
+        text(&out).ends_with("no conflicts remain.\n~/.ssh/config.d/cypress.bak retired to ~/.ssh/retired/cypress.bak.\n"),
+        "{}",
+        text(&out)
+    );
+    assert!(ssh_text(&home, "config").contains("Host printer\n"));
+    assert!(home.path().join(".ssh/retired/cypress.bak").is_file());
+}
