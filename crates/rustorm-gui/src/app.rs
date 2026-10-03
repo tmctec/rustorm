@@ -12,6 +12,10 @@ use rustorm_core::{
     SettingsDraft, Workspace, WorkspaceSection, WriteOptions,
 };
 
+mod conflicts;
+
+pub use conflicts::{ConflictsView, RetireView};
+
 use crate::highlight::highlight_job;
 use crate::ops::{host_text, Op};
 use crate::rows::{sort_rows, workspace_rows, Column, Filters, HostRow, SortDir};
@@ -209,6 +213,12 @@ pub struct App {
     /// setting field.
     settings_view: SettingsView,
     dialog: Option<Dialog>,
+    /// The Conflicts dialog, drawn under any [`Dialog`].
+    conflicts: Option<ConflictsView>,
+    /// Pairs in the reconcile report, for the sidebar button.
+    conflict_total: usize,
+    /// The report's summary line, the button's hover text.
+    conflict_summary: String,
     editor_error: Option<String>,
     status: String,
     last_backup: Option<PathBuf>,
@@ -253,6 +263,9 @@ impl App {
             editor_ghost: None,
             editor_selection: None,
             dialog: None,
+            conflicts: None,
+            conflict_total: 0,
+            conflict_summary: String::new(),
             editor_error: None,
             status: String::new(),
             last_backup: None,
@@ -469,6 +482,7 @@ impl App {
         if self.filters.file.is_some_and(|f| f >= self.ws.files.len()) {
             self.filters.file = None;
         }
+        self.rereport();
     }
 
     /// Replaces the workspace with `fresh`, matching files by path: a
@@ -681,6 +695,11 @@ impl App {
             | Some(Dialog::Move { error, .. })
             | Some(Dialog::AddSection { error, .. })
             | Some(Dialog::RenameSection { error, .. }) => *error = Some(message.clone()),
+            _ if self.conflicts.is_some() => {
+                if let Some(view) = &mut self.conflicts {
+                    view.fail(message.clone());
+                }
+            }
             _ => {
                 if let Some(form) = &mut self.form {
                     form.error = Some(message.clone());
@@ -774,6 +793,12 @@ impl App {
         match outcome.select {
             Some(name) => self.select(&name),
             None if matches!(op, Op::AddSection { .. } | Op::RenameSection { .. }) => {}
+            None if matches!(op, Op::Reconcile { .. } | Op::Retire { .. }) => {
+                match self.selected.clone() {
+                    Some(s) => self.select(&s),
+                    None => self.form = self.form.take().filter(|f| f.mode == FormMode::Add),
+                }
+            }
             None => {
                 self.selected = None;
                 self.form = None;
@@ -906,6 +931,7 @@ impl App {
                 Tab::Editor => self.editor_tab(ui),
             }
         });
+        self.conflicts_dialog(&ctx);
         self.dialogs(&ctx);
     }
 
@@ -1210,6 +1236,24 @@ impl App {
             }
         }
         if multi {
+            ui.add_space(10.0);
+            let n = self.conflict_total;
+            let label = if n > 0 {
+                format!("Conflicts…  {n}")
+            } else {
+                "Conflicts…".to_string()
+            };
+            let resp = ui
+                .add_enabled(n > 0 && !self.editor_dirty(), Button::new(label))
+                .on_hover_text(&self.conflict_summary)
+                .on_disabled_hover_text(if n == 0 {
+                    "No host is defined in two files"
+                } else {
+                    "Save or discard the editor first"
+                });
+            if resp.clicked() {
+                self.open_conflicts();
+            }
             ui.add_space(10.0);
             ui.heading("Files");
             self.files_list(ui);
@@ -2118,7 +2162,11 @@ fn tags_row(ui: &mut Ui, value: &mut String, known: &[String]) {
     ui.horizontal_wrapped(|ui| {
         let mut remove = None;
         for (i, t) in tags.iter().enumerate() {
-            if ui.small_button(format!("{t} ×")).on_hover_text("Remove tag").clicked() {
+            if ui
+                .small_button(format!("{t} ×"))
+                .on_hover_text("Remove tag")
+                .clicked()
+            {
                 remove = Some(i);
             }
         }

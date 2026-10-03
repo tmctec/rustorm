@@ -435,14 +435,21 @@ fn gui_walkthrough_evidence() {
     h.run();
     click(&mut h, "cypressMelissa");
     click(&mut h, "All settings");
-    writeln!(out, "\n--- metadata, cypressMelissa: filled view {}", keys(&h)).unwrap();
+    writeln!(
+        out,
+        "\n--- metadata, cypressMelissa: filled view {}",
+        keys(&h)
+    )
+    .unwrap();
     writeln!(
         out,
         "Notes & location group shown: {}; summary shows location {}, chip prod {}, note {}",
         h.query_all_by_label("Notes & location").next().is_some(),
         h.query_all_by_label("Austin DC, rack 4").next().is_some(),
         h.query_all_by_label("prod").next().is_some(),
-        h.query_all_by_label_contains("Primary build box").next().is_some()
+        h.query_all_by_label_contains("Primary build box")
+            .next()
+            .is_some()
     )
     .unwrap();
     click(&mut h, "prod ×");
@@ -478,6 +485,137 @@ fn gui_walkthrough_evidence() {
         std::fs::read_to_string(d.join("cypress")).unwrap()
     )
     .unwrap();
+
+    // Reconcile: the Conflicts dialog on docs/cli.md's example workspace
+    // under a temporary home.
+    let home = tempfile::tempdir().unwrap();
+    let ssh = home.path().join(".ssh");
+    std::fs::create_dir_all(ssh.join("config.d")).unwrap();
+    std::fs::write(
+        ssh.join("config"),
+        "Include ~/.ssh/config.d/*\n\nHost github\n    HostName github.com\n    User git\n",
+    )
+    .unwrap();
+    std::fs::write(ssh.join("config.d/cypress"), "Host cypressPro\n    HostName 10.10.0.2\n    User travis\n\nHost cypressPro-ext\n    HostName cypress.example.com\n    User travis\n    Port 2222\n\n# location: Austin DC, rack 4\nHost lab-1\n    HostName 10.10.0.30\n    User travis\n").unwrap();
+    let bak = "Host cypressPro\n    HostName 10.10.0.9\n    User travis\n\n# old box\nHost cypressPro-ext\n    hostname   cypress.example.com\n    User travis\n    Port 2222\n\nHost lab-1\n    HostName 10.10.0.30\n    User travis\n\nHost printer\n    HostName 192.168.1.20\n";
+    std::fs::write(ssh.join("config.d/cypress.bak"), bak).unwrap();
+    let env = rustorm_core::Env {
+        user: None,
+        home: Some(home.path().to_path_buf()),
+    };
+    let app = App::with_env(ssh.join("config"), env).unwrap();
+    let mut h = Harness::builder()
+        .with_size([1500.0, 950.0])
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    writeln!(
+        out,
+        "\n--- reconcile: sidebar button \"Conflicts…  3\" shown: {}",
+        h.query_all_by_label("Conflicts…  3").next().is_some()
+    )
+    .unwrap();
+    click(&mut h, "Conflicts…  3");
+    let list = |h: &Harness<'static, App>| {
+        let s = h.state();
+        let v = s.conflicts().unwrap();
+        let mut text = format!("  {}\n", v.report().summary());
+        for i in v.order() {
+            let p = &v.report().items[i];
+            let live = p.live.as_ref().map_or("—".to_string(), |l| l.label.clone());
+            text.push_str(&format!(
+                "  {:<16} {:<26} {:<30} {}\n",
+                p.name,
+                live,
+                p.copy.label,
+                v.kind_text(p)
+            ));
+        }
+        text
+    };
+    writeln!(out, "Conflicts dialog:\n{}", list(&h)).unwrap();
+    let (live, copy) = {
+        let s = h.state();
+        let p = s.conflicts().unwrap().selected().unwrap();
+        (p.live.as_ref().unwrap().text.clone(), p.copy.text.clone())
+    };
+    let (ml, mc) = h.state().conflicts().unwrap().marked_lines();
+    writeln!(
+        out,
+        "selected cypressPro side by side (headings shown: {}, {}):\n--- live\n{live}--- copy\n{copy}marked: live {ml:?}, copy {mc:?}",
+        h.query_all_by_label("live  ~/.ssh/config.d/cypress:1").next().is_some(),
+        h.query_all_by_label("copy  ~/.ssh/config.d/cypress.bak:1").next().is_some(),
+    )
+    .unwrap();
+    click(&mut h, "Take copy");
+    writeln!(
+        out,
+        "Take copy: status {:?}\n{}",
+        h.state().status(),
+        list(&h)
+    )
+    .unwrap();
+    click(&mut h, "Drop identical");
+    writeln!(
+        out,
+        "Drop identical: status {:?}\n{}",
+        h.state().status(),
+        list(&h)
+    )
+    .unwrap();
+    click(&mut h, "Retire cypress.bak");
+    click(&mut h, "Retire");
+    let blockers = h
+        .state()
+        .conflicts()
+        .unwrap()
+        .retire()
+        .unwrap()
+        .blockers
+        .clone();
+    writeln!(
+        out,
+        "Retire cypress.bak -> Retire: refused, blockers {blockers:?}"
+    )
+    .unwrap();
+    click(&mut h, "Cancel");
+    click(&mut h, "Keep live");
+    writeln!(out, "Keep live (lab-1): status {:?}", h.state().status()).unwrap();
+    click(&mut h, "Retire cypress.bak");
+    click(&mut h, "Retire");
+    let blockers = h
+        .state()
+        .conflicts()
+        .unwrap()
+        .retire()
+        .unwrap()
+        .blockers
+        .clone();
+    writeln!(out, "Retire again: blockers {blockers:?}").unwrap();
+    click(&mut h, "Add printer");
+    writeln!(out, "Add printer: status {:?}", h.state().status()).unwrap();
+    click(&mut h, "Retire");
+    let names = |dir: &std::path::Path| {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        v.sort();
+        v
+    };
+    writeln!(
+        out,
+        "Retire: status {:?}; dialog open {}; sidebar count {}\n~/.ssh/retired: {:?}\n~/.ssh/config.d: {:?}\n--- ~/.ssh/config.d/cypress after\n{}--- ~/.ssh/config after\n{}",
+        h.state().status(),
+        h.state().conflicts().is_some(),
+        h.state().conflict_count(),
+        names(&ssh.join("retired")),
+        names(&ssh.join("config.d")),
+        std::fs::read_to_string(ssh.join("config.d/cypress")).unwrap(),
+        std::fs::read_to_string(ssh.join("config")).unwrap(),
+    )
+    .unwrap();
+    assert!(!ssh.join("config.d/cypress.bak").exists());
+    assert!(ssh.join("retired/cypress.bak").exists());
 
     std::fs::write(out_path, out).unwrap();
     assert!(after.contains("ControlMaster auto"));

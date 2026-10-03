@@ -1,8 +1,27 @@
 //! The writes the GUI makes, each a sequence of `rustorm_core` operations.
 
+use std::path::{Path, PathBuf};
+
 use rustorm_core::{
-    AddSpec, CloneSpec, EditSpec, Env, HostSelector, SectionRename, SettingChange, Workspace,
+    remaining_message, AddSpec, CloneSpec, Decision, EditSpec, Env, HostSelector, PairKind,
+    SectionRename, SettingChange, Workspace, WriteOptions,
 };
+
+/// One reconcile decision, naming its pair as the Conflicts dialog showed
+/// it, so a pair that changed since is refused instead of decided blind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairDecision {
+    /// A name the pair answers to.
+    pub name: String,
+    /// The copy's file, absolute.
+    pub copy: PathBuf,
+    /// The live block's text as shown; `None` for an orphan.
+    pub live_text: Option<String>,
+    /// The copy's text as shown.
+    pub copy_text: String,
+    /// What to do.
+    pub decision: Decision,
+}
 
 /// One write the user asked for from the Hosts tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +90,45 @@ pub enum Op {
         /// One entry per keyword whose values changed.
         changes: Vec<SettingChange>,
     },
+    /// The Conflicts dialog: decisions on pairs of the reconcile report.
+    Reconcile {
+        /// The decisions, applied together.
+        decisions: Vec<PairDecision>,
+        /// The copy file whose orphans are in scope; `None` reports every
+        /// pair and no orphans.
+        scope: Option<PathBuf>,
+        /// Pairs kept live this session, as (name, copy file); they do not
+        /// count as remaining.
+        kept: Vec<(String, PathBuf)>,
+    },
+    /// Moves a fully resolved copy to `~/.ssh/retired/`.
+    Retire {
+        /// The file, absolute.
+        file: PathBuf,
+        /// Names of the conflicts and orphans decided without a write.
+        decided: Vec<String>,
+    },
+}
+
+/// The index of the loaded file at absolute path `path`.
+fn file_index(ws: &Workspace, path: &Path) -> rustorm_core::Result<usize> {
+    (0..ws.files.len())
+        .find(|&i| ws.abs(i) == path)
+        .ok_or_else(|| rustorm_core::Error::Usage(format!("{} is not loaded.", path.display())))
+}
+
+/// Conflicts of `ws` not in `kept`.
+pub fn remaining_conflicts(ws: &Workspace, kept: &[(String, PathBuf)]) -> usize {
+    ws.reconcile_report(None)
+        .items
+        .iter()
+        .filter(|p| {
+            p.kind == PairKind::Conflict
+                && !kept
+                    .iter()
+                    .any(|(n, c)| p.answers_to(n) && p.copy.file == *c)
+        })
+        .count()
 }
 
 /// What a successful [`Op`] did.
@@ -98,7 +156,11 @@ impl Op {
             | Op::Settings { name, .. } => vec![name.clone()],
             Op::Edit { original, name, .. } => vec![original.clone(), name.trim().to_string()],
             Op::Clone { source, new_name } => vec![source.clone(), new_name.trim().to_string()],
-            Op::AddSection { .. } | Op::RenameSection { .. } => Vec::new(),
+            // A reconcile decision checks its pair's text itself.
+            Op::AddSection { .. }
+            | Op::RenameSection { .. }
+            | Op::Reconcile { .. }
+            | Op::Retire { .. } => Vec::new(),
         }
     }
 
@@ -272,6 +334,51 @@ impl Op {
                 };
                 Ok(Outcome {
                     message: said(change.messages, single),
+                    select: None,
+                })
+            }
+            Op::Reconcile {
+                decisions,
+                scope,
+                kept,
+            } => {
+                let scope = match scope {
+                    Some(p) => Some(vec![file_index(ws, p)?]),
+                    None => None,
+                };
+                let report = ws.reconcile_report(scope.as_deref());
+                let mut picked = Vec::new();
+                for d in decisions {
+                    let stale = || rustorm_core::Error::ReconcileStale(d.name.clone());
+                    let i = report
+                        .items
+                        .iter()
+                        .position(|p| p.answers_to(&d.name) && p.copy.file == d.copy)
+                        .ok_or_else(stale)?;
+                    let p = &report.items[i];
+                    if p.copy.text != d.copy_text
+                        || p.live.as_ref().map(|l| &l.text) != d.live_text.as_ref()
+                    {
+                        return Err(stale());
+                    }
+                    picked.push((i, d.decision.clone()));
+                }
+                let change = ws.apply_decisions(&report, &picked, None)?;
+                // The core counts this run's decisions; the dialog also
+                // counts the pairs kept live earlier.
+                let mut messages = change.messages;
+                messages.pop();
+                messages.push(remaining_message(remaining_conflicts(ws, kept)));
+                Ok(Outcome {
+                    message: messages.join(" "),
+                    select: None,
+                })
+            }
+            Op::Retire { file, decided } => {
+                let i = file_index(ws, file)?;
+                let change = ws.retire(i, decided, WriteOptions::default())?;
+                Ok(Outcome {
+                    message: change.messages.join(" "),
                     select: None,
                 })
             }
