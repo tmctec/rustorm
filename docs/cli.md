@@ -35,6 +35,10 @@ This document is the contract the implementation is built against. Each command 
 | D25 | Host metadata lives in `# key: value` comment lines directly above the `Host` line. The keys are `note`, `location`, `privateKeyLocation`, `other` and `tags`; `set`, `unset`, `add` and `clone` take them like ssh keys. `ssh` ignores the lines and the file stays plain ssh_config. | A sidecar file or rustorm's own config | agreed |
 | D26 | `show`, `list` and `search` take `--where`, `--filter`, `--format txt\|json\|csv\|yaml` and `--just-value`. Output holds exactly the keys named in `--filter`; `Host` is a key like any other. `--json` means `--format json`. | A separate `get` command | agreed |
 | D27 | A key named in `--filter` that a host does not set, directly or through `Host *`, prints empty and the command exits 4 after a warning per host and key. `--allow-missing` exits 0. `Host`, `section`, `file` and the metadata list `tags` are never missing. | Exit 0 with an empty value | agreed |
+| D28 | `reconcile` (alias `resolve`) resolves every host defined in two or more workspace files, one copy at a time against the live definition, and never deletes a file: a fully resolved copy retires to `~/.ssh/retired/`, outside every `Include` glob. | Delete backup files; reuse `combine --on-conflict` | agreed |
+| D29 | The live definition is the one ssh reads first: the files an `Include` line loads are read where the line stands, so a host in an included file is live over the same host below that `Include` in the root, and a file that looks like a backup is live when it sorts first. `reconcile` says so whenever a backup is the live one. | Treat the non-backup file, or the root, as live | agreed |
+| D30 | Two definitions are identical when their directives (canonical key case, whitespace collapsed, in order) and their metadata lines match. Plain comments, blank lines and indentation never make a conflict; a metadata difference does. | Compare bytes | agreed |
+| D31 | Taking the copy keeps the live `Host` line (its aliases), its section and its place; only the body lines and the metadata lines come from the copy. Per-key picks exist on a terminal and in the TUI and GUI. | Replace the whole block | agreed |
 
 ## Synopsis
 
@@ -48,11 +52,11 @@ rustorm [GLOBAL OPTIONS] <COMMAND> [ARGS]
 |---|---|
 | `-c, --config <FILE>` | Operate on `FILE` instead of `~/.ssh/config`. |
 | `--no-backup` | Do not write `<config>~` before changing the file. |
-| `--json` | Emit JSON instead of text on `list`, `show`, `dump`, `search`, `check`, `includes`. This is the machine interface; there is no web API. On `list`, `show` and `search` it is the same as `--format json` (see Reading output). |
+| `--json` | Emit JSON instead of text on `list`, `show`, `dump`, `search`, `check`, `includes`, `reconcile`. This is the machine interface; there is no web API. On `list`, `show` and `search` it is the same as `--format json` (see Reading output). |
 | `--no-color` | Disable ANSI color. `NO_COLOR` in the environment does the same. |
 | `-q, --quiet` | Suppress success messages. Errors still print. |
 | `-s, --section <NAME>` | Section for `add`, `edit`, `clone`, `move`, `list`, `show` and `search`; accepted before or after the command. On the three read commands it selects hosts, the same as `--where section=NAME`. |
-| `-f, --file <NAME\|FILE>` | The workspace file for `add`, `edit`, `clone`, `move`, `set`, `unset`, `delete`, `alias`, `unalias`, `add-section`, `rename-section`, `delete-all` and `dump`, overriding routing (see Included files); every other command refuses it with exit 2. `NAME` is a loaded file's name, such as `cypress`; anything else is a path. |
+| `-f, --file <NAME\|FILE>` | The workspace file for `add`, `edit`, `clone`, `move`, `set`, `unset`, `delete`, `alias`, `unalias`, `add-section`, `rename-section`, `delete-all` and `dump`, overriding routing (see Included files), and the destination of `reconcile --add`; every other command refuses it with exit 2. `NAME` is a loaded file's name, such as `cypress`; anything else is a path. |
 | `-V, --version` | Print the version and exit. |
 | `-h, --help` | Print help and exit. |
 
@@ -78,6 +82,7 @@ Canonical name first. Every alias in the third column is accepted on the command
 | `unalias` | — | `unalias` | — | F-14 |
 | `backup` | `backup` | automatic `config~` | — | F-15 |
 | `check` | — | TODO item | `lint` | F-16 |
+| `reconcile` | — | — | `resolve` | F-61 |
 | `completion` | contrib script | — | — | F-17 |
 | `sections` | — | — | — | F-20 |
 | `rename-section` | — | — | — | F-21 |
@@ -1197,7 +1202,7 @@ Reads the config and reports problems without changing anything: keys not in ssh
 
 On a workspace of several files it checks every file and also reports:
 
-- **A host defined in two files.** ssh uses the first definition it reads; the others are dead text.
+- **A host defined in two files.** ssh uses the first definition it reads; the others are dead text. `rustorm reconcile` drops the identical copies and walks through the real conflicts.
 - **An `Include` that loads a backup.** A matched file whose name ends in `~`, `.bak`, `.orig` or `.old`, or contains `.bak.`, looks like a backup, and its hosts shadow or duplicate the real ones.
 - **An `Include` inside `Host *`.** rustorm and ssh both read it as global (see Included files); moving the line above `Host *` says so plainly.
 
@@ -1229,6 +1234,125 @@ no problems in 14 hosts.
 **Exit status**
 
 0 no problems · 1 problems found · 3 config file unreadable.
+
+### reconcile
+
+Origin: new · Status: v1 · Aliases: `resolve`
+
+**Synopsis**
+
+```
+rustorm reconcile [<FILE>...] [--list]
+                  [--take-copy <HOST>]... [--keep-live <HOST>]... [--add <HOST>]...
+                  [--all-live | --all-copy] [--drop-identical] [--retire]
+```
+
+**Description**
+
+Resolves the hosts defined in two or more workspace files (D28), the ones `check` reports as `defined in ... ssh uses the first`. Each pair is a **live** definition, the one ssh reads first (D29), and a **copy**, a later one. A host in three files makes two pairs with the same live definition. When the live definition sits in a file that looks like a backup (see `check`), the output says so: `note: github: ssh reads ~/.ssh/config.d/cypress.bak first, so its definition is the live one.`
+
+With `FILE...` only the copies in those files are in scope. `FILE` is a loaded file's name or a path, as for `--file`.
+
+Each pair is one of:
+
+| Kind | Meaning |
+|---|---|
+| identical | The directives (canonical key case, whitespace collapsed, in order) and the metadata lines match (D30). Plain comments, blank lines and indentation are ignored. |
+| conflict | Anything else, a metadata difference included. |
+| orphan | A host in a named `FILE` that no other file defines. Orphans appear only when `FILE...` is given. |
+
+**Listing.** `--list` prints `N conflicts, M identical, K orphans across F files`, where `F` counts the files holding a pair or an orphan, then a unified diff per conflict, live first, over the normalized block (metadata lines, the `Host` line, one line per directive), then one `orphan: <host> in <file>` line per orphan. A blank line separates the diffs. Listing is what `reconcile` does off a terminal when no decision is given. `--json` prints the report as one object, `{"conflicts": N, "identical": M, "orphans": K, "files": F, "items": [...]}`; each item carries `name`, `names` (every name the pair shares), `kind`, `live` and `copy` (each `{"file", "line", "section", "text"}`, `live` `null` for an orphan), `live_is_backup`, `keys` (each differing key with its `live` and `copy` values) and `diff`. `--json` applies nothing; given with a decision it is a usage error.
+
+**On a terminal**, without a decision, each conflict prints its two blocks side by side, live on the left, and asks `[l]ive / [c]opy / [k]eys / [s]kip / [q]uit`. `k` asks once per differing key, `[l]ive / [c]opy`, and builds the result from the picks. With `FILE...` each orphan asks `[a]dd / [s]kip / [q]uit`. `q` stops asking and applies the decisions made so far.
+
+**Decisions** without a terminal:
+
+| Decision | Effect |
+|---|---|
+| `--take-copy HOST` | The live block takes the copy's body and metadata lines. Its `Host` line (aliases), its section and its place stay (D31). |
+| `--keep-live HOST` | Writes nothing; the conflict counts as decided for this run. On an orphan, leaves it out of the live config. |
+| `--add HOST` | Moves the orphan into the root, or into the file `--file` names, in its section when that file has a section of the same name. |
+| `--all-live` | `--keep-live` for every conflict not named otherwise. |
+| `--all-copy` | `--take-copy` for every conflict not named otherwise. |
+| `--drop-identical` | Removes every identical copy's block, its leading comments included, from the copy's file. The live definition is never touched. |
+
+A host flag repeats for several hosts. A host with copies in two files needs the copy named as `FILE`. Every changed file is written once, after its own backup (see Included files). Messages name each decision, then `N conflicts remain.` or `no conflicts remain.` counts the conflicts in scope left without a decision.
+
+**Retiring.** `--retire` needs `FILE...`. After the decisions it moves each named file to `~/.ssh/retired/<name>` (created with mode `0700`; an existing name gets `.1`, `.2`, ...) when every host in it is resolved: identical to its live definition, a conflict decided in this run, or an orphan added or left out. A file that still holds the live definition of a host whose copy elsewhere differs is not resolved, since ssh would read that copy instead. Otherwise the file stays and the error names what remains. The root never retires. No file is ever deleted.
+
+**Options**
+
+| Option | Effect |
+|---|---|
+| `--list` | Print the report; decide nothing. |
+| `--take-copy <HOST>` | Take the copy for `HOST`. Repeatable. |
+| `--keep-live <HOST>` | Keep the live definition of `HOST`, or leave the orphan `HOST` out. Repeatable. |
+| `--add <HOST>` | Move the orphan `HOST` into the root or the `--file` target. Repeatable. |
+| `--all-live` | Keep the live definition of every other conflict. |
+| `--all-copy` | Take the copy of every other conflict. Conflicts with `--all-live`. |
+| `--drop-identical` | Remove every identical copy from its file. |
+| `--retire` | Move each named `FILE` to `~/.ssh/retired/` once fully resolved. |
+
+**Examples**
+
+On the root `Include ~/.ssh/config.d/*` with `github`, `~/.ssh/config.d/cypress` holding `cypressPro`, `cypressPro-ext` and `lab-1`, and a stray `~/.ssh/config.d/cypress.bak` holding the same three plus `printer`:
+
+```
+$ rustorm reconcile --list
+2 conflicts, 1 identical, 0 orphans across 2 files
+--- ~/.ssh/config.d/cypress (live)
++++ ~/.ssh/config.d/cypress.bak (copy)
+@@ -1,3 +1,3 @@ cypressPro
+ Host cypressPro
+-    HostName 10.10.0.2
++    HostName 10.10.0.9
+     User travis
+
+--- ~/.ssh/config.d/cypress (live)
++++ ~/.ssh/config.d/cypress.bak (copy)
+@@ -1,4 +1,3 @@ lab-1
+-# location: Austin DC, rack 4
+ Host lab-1
+     HostName 10.10.0.30
+     User travis
+
+$ rustorm reconcile --drop-identical
+1 identical copy dropped from ~/.ssh/config.d/cypress.bak.
+2 conflicts remain.
+
+$ rustorm reconcile --take-copy cypressPro --keep-live lab-1
+cypressPro: took the copy from ~/.ssh/config.d/cypress.bak into ~/.ssh/config.d/cypress.
+lab-1: kept ~/.ssh/config.d/cypress.
+no conflicts remain.
+
+$ rustorm reconcile cypress.bak --list
+1 conflict, 1 identical, 1 orphan across 2 files
+--- ~/.ssh/config.d/cypress (live)
++++ ~/.ssh/config.d/cypress.bak (copy)
+@@ -1,4 +1,3 @@ lab-1
+-# location: Austin DC, rack 4
+ Host lab-1
+     HostName 10.10.0.30
+     User travis
+
+orphan: printer in ~/.ssh/config.d/cypress.bak
+
+$ rustorm reconcile cypress.bak --retire
+error: ~/.ssh/config.d/cypress.bak not retired; undecided: lab-1 (conflict), printer (orphan).
+
+$ rustorm reconcile cypress.bak --keep-live lab-1 --add printer --retire
+lab-1: kept ~/.ssh/config.d/cypress.
+printer added to ~/.ssh/config from ~/.ssh/config.d/cypress.bak.
+no conflicts remain.
+~/.ssh/config.d/cypress.bak retired to ~/.ssh/retired/cypress.bak.
+
+$ rustorm reconcile --take-copy nas
+error: nas is not defined in two workspace files.
+```
+
+**Exit status**
+
+0 no conflict in scope left undecided · 1 conflicts remain, or a `--retire` refused · 2 usage: an unknown or undecidable host, `--retire` without `FILE`, `--json` with a decision, `--all-live` with `--all-copy` · 3 a file unreadable, unwritable or not movable.
 
 ### completion
 
@@ -1288,6 +1412,7 @@ rustorm 0.1.0
 | `~/.ssh/config` | The file every command reads and writes. `--config` overrides it. Created with mode `0600` when missing. |
 | `~/.ssh/config~` | Backup written before every change (D2). |
 | Included files | Every file the root's `Include` lines load (see Included files). Each is written only when a change routes to it, after a backup to its own `<file>~`, or to `<dir>/.<name>~` when an `Include` pattern would match `<file>~`. |
+| `~/.ssh/retired/` | Copies `reconcile --retire` moved out of the workspace, outside every `Include` glob. |
 | rustorm config | Command aliases and defaults, TOML. Linux: `$XDG_CONFIG_HOME/rustorm/config.toml` (`~/.config/rustorm/config.toml`). macOS: `~/Library/Application Support/rustorm/config.toml`. Windows: `%AppData%\rustorm\config.toml`. |
 
 rustorm config example:
