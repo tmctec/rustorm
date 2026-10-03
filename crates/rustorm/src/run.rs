@@ -1262,7 +1262,11 @@ fn reconcile(ctx: &Ctx, files: &[String], flags: &ReconcileFlags) -> Result<i32>
         return Ok(listed_code);
     }
     let decisions = if interactive {
-        ask_decisions(&report)?
+        let asked = ask_decisions(&report)?;
+        // Read again: a block changed on disk while the prompt waited is
+        // refused as stale, never decided blind.
+        ws = ctx.load()?;
+        asked
     } else {
         flag_decisions(&report, flags)?
     };

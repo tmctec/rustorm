@@ -1,11 +1,16 @@
-//! TUI / GUI parity (catalog par-1 .. par-13): each scenario runs one
+//! TUI / GUI parity (catalog par-1 .. par-18): each scenario runs one
 //! operation in `rustorm-tui` (key events) and in `rustorm-gui` (kittest
 //! clicks and typing) on identical workspaces, and in `rustorm-core`
 //! directly on a third copy. All three must leave byte-identical files
-//! and backups, and the two UIs must report the same message.
+//! and backups, and the two UIs must report the same message. The
+//! reconcile scenarios (par-16 ..) also run the `rustorm` binary on a
+//! fourth copy under a temporary HOME.
 
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+use std::sync::OnceLock;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use egui_kittest::kittest::Queryable;
@@ -13,7 +18,8 @@ use egui_kittest::Harness;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use rustorm_core::{
-    AddSpec, CloneSpec, Config, EditSpec, Env, HostSelector, SettingChange, Workspace, WriteOptions,
+    AddSpec, CloneSpec, Config, Decision, EditSpec, Env, HostSelector, PairKind, SettingChange,
+    Workspace, WriteOptions,
 };
 use rustorm_gui::App as Gui;
 use rustorm_tui::{App as Tui, Focus, Options, Theme};
@@ -48,10 +54,21 @@ fn lab_text() -> String {
     c.render()
 }
 
-/// A root that includes `config.d/*`, plus `ranch` and `lab`.
+// docs/cli.md's reconcile example: `cypress.bak` is a stray copy of
+// `cypress` with `cypressPro` changed, `cypressPro-ext` identical, `lab-1`
+// without its location, and the orphan `printer`.
+const RECONCILE_ROOT: &str =
+    "Include ~/.ssh/config.d/*\n\nHost github\n    HostName github.com\n    User git\n";
+const CYPRESS: &str = "Host cypressPro\n    HostName 10.10.0.2\n    User travis\n\nHost cypressPro-ext\n    HostName cypress.example.com\n    User travis\n    Port 2222\n\n# location: Austin DC, rack 4\nHost lab-1\n    HostName 10.10.0.30\n    User travis\n";
+const BAK: &str = "Host cypressPro\n    HostName 10.10.0.9\n    User travis\n\n# old box\nHost cypressPro-ext\n    hostname   cypress.example.com\n    User travis\n    Port 2222\n\nHost lab-1\n    HostName 10.10.0.30\n    User travis\n\nHost printer\n    HostName 192.168.1.20\n";
+
+/// A root that includes `config.d/*`, plus `ranch` and `lab`; or, from
+/// [`Fixture::reconcile`], a temporary home holding `~/.ssh`.
 struct Fixture {
     dir: tempfile::TempDir,
     root: PathBuf,
+    /// The home directory `~` stands for, when the fixture is one.
+    home: Option<PathBuf>,
 }
 
 impl Fixture {
@@ -70,7 +87,39 @@ impl Fixture {
             ),
         )
         .unwrap();
-        Fixture { dir, root }
+        Fixture {
+            dir,
+            root,
+            home: None,
+        }
+    }
+
+    /// The reconcile example under a temporary home: `~/.ssh/config`,
+    /// `~/.ssh/config.d/cypress` and `~/.ssh/config.d/cypress.bak`.
+    fn reconcile() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join(".ssh");
+        std::fs::create_dir_all(ssh.join("config.d")).unwrap();
+        std::fs::write(ssh.join("config"), RECONCILE_ROOT).unwrap();
+        std::fs::write(ssh.join("config.d/cypress"), CYPRESS).unwrap();
+        std::fs::write(ssh.join("config.d/cypress.bak"), BAK).unwrap();
+        let home = Some(dir.path().to_path_buf());
+        Fixture {
+            root: ssh.join("config"),
+            dir,
+            home,
+        }
+    }
+
+    fn env(&self) -> Env {
+        Env {
+            home: self.home.clone(),
+            ..env()
+        }
+    }
+
+    fn load(&self) -> Workspace {
+        Workspace::load_with_home(&self.root, self.home.as_deref()).unwrap()
     }
 
     fn file(&self, rel: &str) -> PathBuf {
@@ -188,8 +237,8 @@ fn goto(app: &mut Tui, k: &str, nth: usize) {
 
 // ----- the GUI -----
 
-fn harness(path: &Path) -> Harness<'static, Gui> {
-    let app = Gui::with_env(path, env()).unwrap();
+fn harness(f: &Fixture) -> Harness<'static, Gui> {
+    let app = Gui::with_env(&f.root, f.env()).unwrap();
     let mut h = Harness::builder()
         .with_size([1500.0, 950.0])
         .build_ui_state(|ui, app: &mut Gui| app.show(ui), app);
@@ -236,27 +285,40 @@ struct Pair {
     c: Fixture,
     tui: Tui,
     gui: Harness<'static, Gui>,
+    /// Makes the workspace every fixture starts as.
+    fresh: fn() -> Fixture,
 }
 
 impl Pair {
     fn new() -> Pair {
-        let (t, g, c) = (Fixture::new(), Fixture::new(), Fixture::new());
+        Pair::of(Fixture::new)
+    }
+
+    fn of(fresh: fn() -> Fixture) -> Pair {
+        let (t, g, c) = (fresh(), fresh(), fresh());
         let tui = Tui::with_options(
             &t.root,
             Options {
                 no_backup: false,
                 theme: Theme::plain(),
-                env: env(),
+                env: t.env(),
             },
         )
         .unwrap();
-        let gui = harness(&g.root);
-        Pair { t, g, c, tui, gui }
+        let gui = harness(&g);
+        Pair {
+            t,
+            g,
+            c,
+            tui,
+            gui,
+            fresh,
+        }
     }
 
     /// Runs `op` on the core's workspace and saves it as the UIs do.
     fn core(&self, op: impl FnOnce(&mut Workspace)) {
-        let mut ws = Workspace::load_with_home(&self.c.root, None).unwrap();
+        let mut ws = self.c.load();
         op(&mut ws);
         ws.save(WriteOptions::default()).unwrap();
     }
@@ -267,12 +329,12 @@ impl Pair {
         let (t, g, c) = (self.t.snapshot(), self.g.snapshot(), self.c.snapshot());
         assert_eq!(t, c, "TUI files differ from the core's");
         assert_eq!(g, c, "GUI files differ from the core's");
-        assert_ne!(c, Fixture::new().snapshot(), "nothing was written");
+        assert_ne!(c, (self.fresh)().snapshot(), "nothing was written");
     }
 
     /// Neither UI wrote anything.
     fn untouched(&self) {
-        let fresh = Fixture::new().snapshot();
+        let fresh = (self.fresh)().snapshot();
         assert_eq!(self.t.snapshot(), fresh, "the TUI wrote something");
         assert_eq!(self.g.snapshot(), fresh, "the GUI wrote something");
     }
@@ -875,4 +937,375 @@ fn par_15_key_material_refused() {
     assert!(!p.gui.state_mut().save_settings());
     assert_eq!(p.gui.state().settings_error(), Some(MSG));
     p.untouched();
+}
+
+// ----- reconcile: the CLI, the TUI's Conflicts view, the GUI's dialog -----
+
+/// The `rustorm` binary of this build. Cargo hands `CARGO_BIN_EXE_*` only
+/// to the binary's own package, so it is built here once, into the target
+/// directory and profile this test runs from.
+fn rustorm_bin() -> &'static Path {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let exe = std::env::current_exe().unwrap();
+        let profile = exe.parent().unwrap().parent().unwrap();
+        let mut build = Command::new(env!("CARGO"));
+        build
+            .args(["build", "--quiet", "-p", "rustorm", "--bin", "rustorm"])
+            .arg("--manifest-path")
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml"))
+            .env("CARGO_TARGET_DIR", profile.parent().unwrap());
+        match profile.file_name().and_then(|n| n.to_str()) {
+            Some("debug") | None => {}
+            Some("release") => {
+                build.arg("--release");
+            }
+            Some(other) => {
+                build.args(["--profile", other]);
+            }
+        }
+        assert!(build.status().unwrap().success(), "building rustorm");
+        profile.join(format!("rustorm{}", std::env::consts::EXE_SUFFIX))
+    })
+}
+
+/// `rustorm` with `f` as HOME, run without `--config`.
+fn cli_cmd(f: &Fixture) -> Command {
+    let mut c = Command::new(rustorm_bin());
+    c.current_dir(f.dir.path())
+        .env("HOME", f.dir.path())
+        .env("XDG_CONFIG_HOME", f.dir.path().join(".config"))
+        .env("USER", "tester")
+        .env_remove("RUSTORM_CONFIG")
+        .env_remove("RUSTORM_ASSUME_TTY")
+        .env_remove("NO_COLOR")
+        .stdin(Stdio::null());
+    c
+}
+
+fn cli(f: &Fixture, args: &[&str]) -> Output {
+    cli_cmd(f).args(args).output().expect("run rustorm")
+}
+
+fn stdout(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// The core's own reconcile, as `rustorm reconcile FILE... <decisions>`
+/// runs it: decide by host, drop the identical copies when asked, save,
+/// then retire every named file.
+fn core_reconcile(
+    f: &Fixture,
+    files: &[&str],
+    picks: &[(&str, Decision)],
+    drop_identical: bool,
+    retire: bool,
+) {
+    let mut ws = f.load();
+    let files: Vec<String> = files.iter().map(|s| s.to_string()).collect();
+    let scope = (!files.is_empty()).then(|| ws.reconcile_scope(&files).unwrap());
+    let report = ws.reconcile_report(scope.as_deref());
+    let mut d: Vec<(usize, Decision)> = picks
+        .iter()
+        .map(|(h, d)| (report.lookup(h).unwrap(), d.clone()))
+        .collect();
+    if drop_identical {
+        let more = report.bulk(PairKind::Identical, &Decision::DropIdentical, &d);
+        d.extend(more);
+    }
+    let applied = ws.apply_decisions(&report, &d, None).unwrap().value;
+    ws.save(WriteOptions::default()).unwrap();
+    if retire {
+        for i in scope.unwrap() {
+            ws.retire(i, &applied.decided, WriteOptions::default())
+                .unwrap();
+        }
+    }
+}
+
+/// Highlights the row of `host` in the TUI's Conflicts view.
+fn conflict(app: &mut Tui, host: &str) {
+    press(app, 'g');
+    for _ in 0..20 {
+        if app.conflict_selected().as_deref() == Some(host) {
+            return;
+        }
+        app.handle(key(KeyCode::Down));
+    }
+    panic!("{host} not in the TUI's Conflicts view");
+}
+
+/// Opens the GUI's Conflicts dialog.
+fn conflicts(h: &mut Harness<'static, Gui>) {
+    h.get_all_by_label_contains("Conflicts…")
+        .last()
+        .unwrap()
+        .click();
+    h.run();
+    assert!(h.state().conflicts().is_some(), "the dialog opens");
+}
+
+/// The GUI dialog's row of `host`, whose copy is in cypress.bak.
+fn row(host: &str) -> String {
+    format!("{host} in ~/.ssh/config.d/cypress.bak")
+}
+
+/// The GUI's message: the status line, or the dialog's refusal.
+fn gui_message(h: &Harness<'static, Gui>) -> String {
+    let s = h.state();
+    match s.conflicts().and_then(|v| v.error()) {
+        Some(e) => e.to_string(),
+        None => s.status().to_string(),
+    }
+}
+
+/// The TUI and the GUI report the same message, and each of its
+/// sentences is a line the CLI printed. Returns the message.
+fn agree(p: &mut Pair, out: &Output) -> String {
+    let t = strip(&p.tui.message().unwrap_or_default());
+    let g = strip(&gui_message(&p.gui));
+    assert_eq!(t, g, "TUI and GUI messages differ");
+    let printed = format!("{}{}", stdout(out), stderr(out));
+    let lines: Vec<&str> = printed
+        .lines()
+        .map(|l| l.strip_prefix("error: ").unwrap_or(l))
+        .collect();
+    for s in t.split_inclusive(". ") {
+        assert!(
+            lines.contains(&s.trim()),
+            "the CLI did not say {s:?}: {printed}"
+        );
+    }
+    t
+}
+
+/// par-16: reconcile — take the copy of one host, keep another live, drop
+/// the identical copies, add the orphan, retire the copy file — through
+/// CLI flags, TUI keys and GUI buttons leaves byte-identical trees, every
+/// backup and the retired file included.
+#[test]
+fn par_16_reconcile_and_retire() {
+    let mut p = Pair::of(Fixture::reconcile);
+    let l = Fixture::reconcile();
+
+    // Take the copy of cypressPro.
+    press(&mut p.tui, 'C');
+    conflict(&mut p.tui, "cypressPro");
+    press(&mut p.tui, 'c');
+    conflicts(&mut p.gui);
+    click(&mut p.gui, &row("cypressPro"));
+    click(&mut p.gui, "Take copy");
+    let out = cli(&l, &["reconcile", "--take-copy", "cypressPro"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    agree(&mut p, &out);
+
+    // Keep lab-1 live: nothing written; every later CLI run repeats it, as
+    // the UIs remember it for the session.
+    conflict(&mut p.tui, "lab-1");
+    press(&mut p.tui, 'l');
+    click(&mut p.gui, &row("lab-1"));
+    click(&mut p.gui, "Keep live");
+    p.same_message();
+
+    // Drop every identical copy in cypress.bak (cypressPro is one now).
+    conflict(&mut p.tui, "lab-1");
+    press(&mut p.tui, 'D');
+    click(&mut p.gui, &row("lab-1"));
+    click(&mut p.gui, "Drop identical");
+    let out = cli(
+        &l,
+        &["reconcile", "--keep-live", "lab-1", "--drop-identical"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(agree(&mut p, &out).starts_with("2 identical copies dropped"));
+
+    // Add the orphan printer to the root. The GUI offers it once Retire is
+    // refused for it, which writes nothing.
+    conflict(&mut p.tui, "printer");
+    press(&mut p.tui, 'a');
+    click(&mut p.gui, &row("lab-1"));
+    click(&mut p.gui, "Retire cypress.bak");
+    click(&mut p.gui, "Retire");
+    assert_eq!(
+        p.gui
+            .state()
+            .conflicts()
+            .unwrap()
+            .retire()
+            .unwrap()
+            .blockers,
+        ["printer (orphan)"]
+    );
+    click(&mut p.gui, "Add printer");
+    let out = cli(
+        &l,
+        &[
+            "reconcile",
+            "cypress.bak",
+            "--keep-live",
+            "lab-1",
+            "--add",
+            "printer",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    agree(&mut p, &out);
+
+    // Retire cypress.bak.
+    conflict(&mut p.tui, "lab-1");
+    press(&mut p.tui, 'R');
+    press(&mut p.tui, 'y');
+    click(&mut p.gui, "Retire");
+    let out = cli(
+        &l,
+        &[
+            "reconcile",
+            "cypress.bak",
+            "--keep-live",
+            "lab-1",
+            "--retire",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        agree(&mut p, &out),
+        "~/.ssh/config.d/cypress.bak retired to ~/.ssh/retired/cypress.bak."
+    );
+
+    core_reconcile(
+        &p.c,
+        &[],
+        &[("cypressPro", Decision::TakeCopy)],
+        false,
+        false,
+    );
+    core_reconcile(&p.c, &[], &[("lab-1", Decision::KeepLive)], true, false);
+    core_reconcile(
+        &p.c,
+        &["cypress.bak"],
+        &[("lab-1", Decision::KeepLive), ("printer", Decision::Add)],
+        false,
+        false,
+    );
+    core_reconcile(
+        &p.c,
+        &["cypress.bak"],
+        &[("lab-1", Decision::KeepLive)],
+        false,
+        true,
+    );
+    p.same_files();
+    assert_eq!(
+        l.snapshot(),
+        p.c.snapshot(),
+        "CLI files differ from the core's"
+    );
+    let tree = p.c.snapshot();
+    assert!(!tree.contains_key(".ssh/config.d/cypress.bak"));
+    assert!(
+        tree[".ssh/retired/cypress.bak"].contains("Host lab-1\n"),
+        "{tree:?}"
+    );
+    assert!(tree[".ssh/config"].contains("Host printer\n"), "{tree:?}");
+    assert!(tree[".ssh/config.d/cypress"].contains("HostName 10.10.0.9"));
+}
+
+/// par-17: retiring while conflicts remain is refused alike, with the same
+/// blockers, and writes nothing anywhere.
+#[test]
+fn par_17_retire_refused() {
+    let mut p = Pair::of(Fixture::reconcile);
+    let l = Fixture::reconcile();
+    press(&mut p.tui, 'C');
+    conflict(&mut p.tui, "printer");
+    press(&mut p.tui, 'R');
+    conflicts(&mut p.gui);
+    click(&mut p.gui, "Retire cypress.bak");
+    click(&mut p.gui, "Retire");
+    assert!(p.gui.state().conflicts().unwrap().retire().unwrap().refused);
+    let out = cli(&l, &["reconcile", "cypress.bak", "--retire"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(
+        agree(&mut p, &out),
+        "~/.ssh/config.d/cypress.bak not retired; undecided: cypressPro (conflict), lab-1 (conflict), printer (orphan)."
+    );
+    let ws = p.c.load();
+    let bak = ws
+        .files
+        .iter()
+        .position(|f| f.path.ends_with("cypress.bak"))
+        .unwrap();
+    assert_eq!(ws.retire_blockers(bak, &[]).len(), 3);
+    p.untouched();
+    assert_eq!(
+        l.snapshot(),
+        Fixture::reconcile().snapshot(),
+        "the CLI wrote"
+    );
+}
+
+/// par-18: a copy changed on disk after the report is refused alike as
+/// stale; nothing is written.
+#[test]
+fn par_18_stale_refused() {
+    let changed = BAK.replace("10.10.0.9", "10.10.0.7");
+    let mut p = Pair::of(Fixture::reconcile);
+    let l = Fixture::reconcile();
+
+    press(&mut p.tui, 'C');
+    conflict(&mut p.tui, "cypressPro");
+    conflicts(&mut p.gui);
+    click(&mut p.gui, &row("cypressPro"));
+    for f in [&p.t, &p.g] {
+        std::fs::write(f.file(".ssh/config.d/cypress.bak"), &changed).unwrap();
+    }
+    press(&mut p.tui, 'c');
+    click(&mut p.gui, "Take copy");
+
+    // The CLI on a terminal: the report is read, the file changes while
+    // the prompt waits, then `c` takes the copy.
+    let mut child = cli_cmd(&l)
+        .env("RUSTORM_ASSUME_TTY", "1")
+        .arg("reconcile")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = child.stderr.take().unwrap();
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 256];
+    while !String::from_utf8_lossy(&seen).contains("cypressPro: [l]ive") {
+        let n = err.read(&mut buf).unwrap();
+        assert!(n > 0, "no prompt: {}", String::from_utf8_lossy(&seen));
+        seen.extend_from_slice(&buf[..n]);
+    }
+    std::fs::write(l.file(".ssh/config.d/cypress.bak"), &changed).unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"c\n").unwrap();
+    drop(input);
+    err.read_to_end(&mut seen).unwrap();
+    let mut out = child.wait_with_output().unwrap();
+    out.stderr = seen;
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+
+    let t = first_sentence(&strip(&p.tui.message().unwrap_or_default())).to_string();
+    let g = first_sentence(&strip(&gui_message(&p.gui))).to_string();
+    assert_eq!(t, "cypressPro changed since the report; reconcile again");
+    assert_eq!(t, g, "TUI and GUI messages differ");
+    assert!(
+        stderr(&out).contains(&format!("error: {t}.\n")),
+        "{}",
+        stderr(&out)
+    );
+    let want = Fixture::reconcile();
+    std::fs::write(want.file(".ssh/config.d/cypress.bak"), &changed).unwrap();
+    let want = want.snapshot();
+    assert_eq!(p.t.snapshot(), want, "the TUI wrote");
+    assert_eq!(p.g.snapshot(), want, "the GUI wrote");
+    assert_eq!(l.snapshot(), want, "the CLI wrote");
 }
