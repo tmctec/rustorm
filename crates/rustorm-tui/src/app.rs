@@ -13,10 +13,12 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 use rustorm_core::{
-    join_and, AddSpec, Change, CloneSpec, Config, EditSpec, Env, Error, FileState, HostSelector,
-    ProblemKind, SectionRename, SettingChange, Workspace, WriteOptions,
+    join_and, remaining_message, AddSpec, Change, CloneSpec, Config, Decision, EditSpec, Env,
+    Error, FileState, HostSelector, KeyPick, PairKind, Pick, ProblemKind, SectionRename,
+    SettingChange, Workspace, WriteOptions,
 };
 
+use crate::conflicts::{marked_lines, Conflicts, Item, View};
 use crate::editor::Editor;
 use crate::hosts::{self, Column, Filters, Row, Sort};
 use crate::settings::SettingsForm;
@@ -183,6 +185,8 @@ enum Mode {
         column: Option<Column>,
         previous: String,
     },
+    /// Hosts defined in two or more files (`C`).
+    Conflicts(Box<Conflicts>),
 }
 
 type Stamp = Option<(SystemTime, u64)>;
@@ -428,6 +432,9 @@ fn help_rows(multi: bool) -> Vec<(&'static str, &'static str, &'static str)> {
             rows.push(("F", "table, sections", "file list"));
             rows.push(("Enter", "files", "show file in editor"));
         }
+        if k == "o" {
+            rows.extend_from_slice(CONFLICT_HELP);
+        }
     }
     rows
 }
@@ -460,6 +467,19 @@ const HELP: &[(&str, &str, &str)] = &[
     ("Ctrl-S", "editor", "save"),
     ("Ctrl-R", "editor", "discard edits"),
     ("Esc", "editor, form, prompt", "back / cancel"),
+];
+
+/// The Conflicts view's keys, in the overlay of a workspace of several
+/// files.
+const CONFLICT_HELP: &[(&str, &str, &str)] = &[
+    ("C", "table", "hosts defined in two files"),
+    ("Enter", "conflicts", "live and copy side by side"),
+    ("l / c", "conflicts", "keep live / take copy"),
+    ("k", "conflicts", "pick key by key: l / c each"),
+    ("a", "conflicts", "add orphan to the root"),
+    ("s", "conflicts", "skip to the next"),
+    ("D", "conflicts", "drop identical copies in file"),
+    ("R", "conflicts", "retire the copy file"),
 ];
 
 /// The whole TUI: model, view state and the mode it is in.
@@ -616,6 +636,15 @@ impl App {
     /// typing replaces it.
     pub fn settings_value_selected(&self) -> bool {
         matches!(&self.mode, Mode::Settings(f) if f.fresh)
+    }
+
+    /// While the Conflicts view is open, the highlighted pair's host, or
+    /// `""` on a file row.
+    pub fn conflict_selected(&self) -> Option<String> {
+        match &self.mode {
+            Mode::Conflicts(c) => Some(c.pair().map_or(String::new(), |p| p.name.clone())),
+            _ => None,
+        }
     }
 
     /// The active filters.
@@ -1282,6 +1311,7 @@ impl App {
             Mode::Form(form) => self.handle_form(form, key),
             Mode::Settings(form) => self.handle_settings(form, key),
             Mode::Prompt(p) => self.handle_prompt(p, key),
+            Mode::Conflicts(c) => self.handle_conflicts(*c, key),
             Mode::PickFilterColumn => {
                 if let KeyCode::Char(c) = key.code {
                     match Column::from_digit_in(c, self.ws.is_multi()) {
@@ -1397,6 +1427,266 @@ impl App {
         }
     }
 
+    // ----- conflicts -----
+
+    /// Reads the workspace again from disk when a file changed there, as
+    /// `run_op` does.
+    fn reload_if_changed(&mut self) -> Result<(), String> {
+        if self.any_disk_changed() {
+            let fresh = Workspace::load_with_home(
+                self.ws.files[0].path.clone(),
+                self.ws.home.clone().as_deref(),
+            )
+            .map_err(|e| tui_error(&e))?;
+            self.replace_workspace(fresh);
+        }
+        Ok(())
+    }
+
+    /// Applies `decisions` against report `ri` of the view and writes each
+    /// changed file after its backup; then reads the pairs again.
+    fn reconcile_apply(&mut self, c: &mut Conflicts, ri: usize, decisions: Vec<(usize, Decision)>) {
+        if !self.dirty().is_empty() {
+            self.error("Save or discard the editor's changes first.");
+            return;
+        }
+        if let Err(e) = self.reload_if_changed() {
+            self.error(e);
+            return;
+        }
+        let mut next = self.ws.clone();
+        let change = match next.apply_decisions(&c.reports[ri], &decisions, None) {
+            Ok(change) => change,
+            Err(e @ Error::ReconcileStale(_)) => {
+                c.report(&self.ws);
+                self.error(format!("{e} Read the duplicates again."));
+                return;
+            }
+            Err(e) => {
+                self.error(tui_error(&e));
+                return;
+            }
+        };
+        if let Err(e) = next.save(self.options()) {
+            self.error(tui_error(&e));
+            return;
+        }
+        self.ws = next;
+        for i in 0..self.ws.files.len() {
+            self.stamps[i] = stamp(&self.ws.files[i].path);
+            self.editors[i].set_text(&self.ws.files[i].original);
+        }
+        c.decided.extend(change.value.decided.iter().cloned());
+        c.report(&self.ws);
+        self.refresh(None);
+        self.show_selected_host();
+        // The core counts the conflicts left in this one call; the view
+        // counts every one still listed and undecided this session.
+        let mut parts = change.messages;
+        parts.pop();
+        parts.push(remaining_message(c.remaining()));
+        parts.extend(change.warnings.into_iter().map(|w| format!("Warning: {w}")));
+        self.msg = Some(Msg::Success(parts.join(" ")));
+    }
+
+    /// Moves copy file `file` to `~/.ssh/retired/`, then loads the
+    /// workspace again.
+    fn reconcile_retire(&mut self, c: &mut Conflicts, file: usize) {
+        if !self.dirty().is_empty() {
+            self.error("Save or discard the editor's changes first.");
+            return;
+        }
+        let path = self.ws.files[file].path.clone();
+        if let Err(e) = self.reload_if_changed() {
+            self.error(e);
+            return;
+        }
+        let Some(file) = self.ws.files.iter().position(|f| f.path == path) else {
+            c.report(&self.ws);
+            return;
+        };
+        let mut next = self.ws.clone();
+        let change = match next.retire(file, &c.decided, self.options()) {
+            Ok(change) => change,
+            Err(e) => {
+                self.error(tui_error(&e));
+                return;
+            }
+        };
+        match Workspace::load_with_home(
+            self.ws.files[0].path.clone(),
+            self.ws.home.clone().as_deref(),
+        ) {
+            Ok(fresh) => self.replace_workspace(fresh),
+            Err(e) => {
+                self.error(tui_error(&e));
+                return;
+            }
+        }
+        c.report(&self.ws);
+        self.msg = Some(Msg::Success(change_text(change)));
+    }
+
+    fn handle_conflicts(&mut self, mut c: Conflicts, key: KeyEvent) {
+        self.msg = None;
+        if c.help {
+            if matches!(
+                key.code,
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
+            ) {
+                c.help = false;
+            }
+            self.mode = Mode::Conflicts(Box::new(c));
+            return;
+        }
+        if let Some(file) = c.confirm.take() {
+            if matches!(key.code, KeyCode::Char('y' | 'Y')) {
+                self.reconcile_retire(&mut c, file);
+            } else {
+                self.msg = Some(Msg::Info("Not retired.".into()));
+            }
+            self.mode = Mode::Conflicts(Box::new(c));
+            return;
+        }
+        if let View::Keys(mut picks) = c.view.clone() {
+            self.handle_key_picks(&mut c, &mut picks, key);
+            self.mode = Mode::Conflicts(Box::new(c));
+            return;
+        }
+        let item = c.item();
+        let pair = c.pair().cloned();
+        let name = pair.as_ref().map(|p| p.name.clone());
+        match key.code {
+            KeyCode::Esc if c.view == View::Pair => c.view = View::List,
+            KeyCode::Esc => return,
+            KeyCode::Char('?') => c.help = true,
+            KeyCode::Down => c.sel = (c.sel + 1).min(c.rows.len().saturating_sub(1)),
+            KeyCode::Up => c.sel = c.sel.saturating_sub(1),
+            KeyCode::Home | KeyCode::Char('g') => c.sel = 0,
+            KeyCode::End | KeyCode::Char('G') => c.sel = c.rows.len().saturating_sub(1),
+            KeyCode::Enter if pair.is_some() => c.view = View::Pair,
+            KeyCode::Char('s') => {
+                if let Some(n) = &name {
+                    c.sel = (c.sel + 1).min(c.rows.len().saturating_sub(1));
+                    self.msg = Some(Msg::Info(format!("{n} skipped.")));
+                }
+            }
+            KeyCode::Char(ch @ ('l' | 'c' | 'a' | 'k')) => {
+                let (Some(Item::Pair(ri, ii)), Some(p)) = (item, &pair) else {
+                    self.error("No pair here. Press R to retire the file.");
+                    self.mode = Mode::Conflicts(Box::new(c));
+                    return;
+                };
+                let n = &p.name;
+                let decision = match (p.kind, ch) {
+                    (PairKind::Identical, _) => {
+                        self.msg = Some(Msg::Info(format!(
+                            "{n} is identical in both files. Press D to drop the identical copies."
+                        )));
+                        None
+                    }
+                    (PairKind::Conflict, 'k') => {
+                        c.view = View::Keys(Vec::new());
+                        None
+                    }
+                    (PairKind::Conflict, 'a') => {
+                        self.error(format!("{n} is not an orphan; only an orphan is added."));
+                        None
+                    }
+                    (PairKind::Orphan, 'c' | 'k') => {
+                        self.error(format!(
+                            "{n} is an orphan. Press a to add it or l to leave it out."
+                        ));
+                        None
+                    }
+                    (_, 'l') => Some(Decision::KeepLive),
+                    (_, 'c') => Some(Decision::TakeCopy),
+                    _ => Some(Decision::Add),
+                };
+                if let Some(d) = decision {
+                    c.view = View::List;
+                    self.reconcile_apply(&mut c, ri, vec![(ii, d)]);
+                }
+            }
+            KeyCode::Char('D') => {
+                if let Some(file) = c.copy_file() {
+                    let decisions: Vec<(usize, Decision)> = c.reports[0]
+                        .items
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, p)| p.kind == PairKind::Identical && p.copy.index == file)
+                        .map(|(i, _)| (i, Decision::DropIdentical))
+                        .collect();
+                    if decisions.is_empty() {
+                        self.msg = Some(Msg::Info(format!(
+                            "No identical copies in {}.",
+                            self.ws.display(file)
+                        )));
+                    } else {
+                        c.view = View::List;
+                        self.reconcile_apply(&mut c, 0, decisions);
+                    }
+                }
+            }
+            KeyCode::Char('R') => {
+                if let Some(file) = c.copy_file() {
+                    let blockers = self.ws.retire_blockers(file, &c.decided);
+                    if file == 0 {
+                        self.error(Error::RetireRoot(self.ws.display(0)).to_string());
+                    } else if !blockers.is_empty() {
+                        self.error(
+                            Error::RetireUnresolved {
+                                file: self.ws.display(file),
+                                remaining: blockers,
+                            }
+                            .to_string(),
+                        );
+                    } else {
+                        c.confirm = Some(file);
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.mode = Mode::Conflicts(Box::new(c));
+    }
+
+    /// `l` or `c` picks the side of the next differing key; the last pick
+    /// applies them all. Backspace takes back a pick; Esc leaves the picks.
+    fn handle_key_picks(&mut self, c: &mut Conflicts, picks: &mut Vec<Pick>, key: KeyEvent) {
+        let (Some(Item::Pair(ri, ii)), Some(p)) = (c.item(), c.pair().cloned()) else {
+            c.view = View::List;
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                c.view = View::Pair;
+                return;
+            }
+            KeyCode::Backspace => {
+                picks.pop();
+            }
+            KeyCode::Char('l') => picks.push(Pick::Live),
+            KeyCode::Char('c') => picks.push(Pick::Copy),
+            _ => {}
+        }
+        if picks.len() < p.keys.len() {
+            c.view = View::Keys(picks.clone());
+            return;
+        }
+        let picks = p
+            .keys
+            .iter()
+            .zip(picks.iter())
+            .map(|(k, pick)| KeyPick {
+                key: k.key.clone(),
+                pick: *pick,
+            })
+            .collect();
+        c.view = View::List;
+        self.reconcile_apply(c, ri, vec![(ii, Decision::Keys(picks))]);
+    }
+
     fn cycle_focus(&mut self, back: bool) {
         let mut order = vec![Focus::Table, Focus::Editor];
         if !self.sections.is_empty() {
@@ -1458,6 +1748,9 @@ impl App {
             KeyCode::BackTab => self.cycle_focus(true),
             KeyCode::Char('n') => self.open_form(FormKind::AddSection),
             KeyCode::Char('F') if self.ws.is_multi() => self.focus = Focus::Files,
+            KeyCode::Char('C') if self.ws.is_multi() => {
+                self.mode = Mode::Conflicts(Box::new(Conflicts::new(&self.ws)))
+            }
             KeyCode::Down | KeyCode::Char('j') => {
                 let s = self.move_sel(1, len, cur);
                 self.table.select((len > 0).then_some(s));
@@ -1690,6 +1983,12 @@ impl App {
             Mode::Form(form) => self.render_form(frame, area, &form),
             Mode::Settings(form) => self.render_settings(frame, area, &form),
             Mode::Prompt(p) => self.render_prompt(frame, area, &p),
+            Mode::Conflicts(c) => {
+                self.render_conflicts(frame, outer[0], &c);
+                if c.help {
+                    self.render_help(frame, area);
+                }
+            }
             _ => {}
         }
     }
@@ -1938,8 +2237,19 @@ impl App {
                 "type to filter  Enter:keep  Esc:undo"
             }
             (Mode::Help, _) => "Esc/?:close help",
+            (Mode::Conflicts(c), _) if c.help => "Esc/?:close help",
+            (Mode::Conflicts(c), _) if c.confirm.is_some() => "y:retire  any other key:cancel",
+            (Mode::Conflicts(c), _) => match c.view {
+                View::List => {
+                    "?:help  Up/Down:move  Enter:side by side  l:keep live  c:take copy  k:key by key  a:add orphan  s:skip  D:drop identical  R:retire file  Esc:back"
+                }
+                View::Pair => {
+                    "l:keep live  c:take copy  k:key by key  a:add orphan  s:skip to next  D:drop identical  R:retire file  Esc:back to list"
+                }
+                View::Keys(_) => "l:live value  c:copy value  Backspace:undo pick  Esc:back",
+            },
             (_, Focus::Table) if multi => {
-                "?:help  q:quit  Tab:focus  F:files  1-8:sort  / f:filter  x:clear  a:add  e:edit  Enter:settings  d:delete  c:clone  m:move  n:new section  o:editor"
+                "?:help  q:quit  Tab:focus  F:files  C:conflicts  1-8:sort  / f:filter  x:clear  a:add  e:edit  Enter:settings  d:delete  c:clone  m:move  o:editor"
             }
             (_, Focus::Sections) if multi => {
                 "?:help  q:quit  Tab:focus  F:files  Enter:filter to section  R:rename section  n:new section"
@@ -1976,6 +2286,209 @@ impl App {
             Paragraph::new(lines).block(self.pane_block("Keys".into(), true)),
             rect,
         );
+    }
+
+    /// The Conflicts view over the panes: the list, or one pair side by
+    /// side, or its per-key picks.
+    fn render_conflicts(&self, frame: &mut Frame, area: Rect, c: &Conflicts) {
+        let theme = self.opts.theme;
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        frame.render_widget(Clear, area);
+        let pair = c.pair();
+        let title = match (&c.view, pair) {
+            (View::List, _) | (_, None) => format!("Duplicates  {}", c.summary()),
+            (View::Pair, Some(p)) => format!("Duplicates  {} ({})", p.name, c.class(p)),
+            (View::Keys(_), Some(p)) => format!("Duplicates  {} key by key", p.name),
+        };
+        let block = self.pane_block(title, true);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let mut foot: Vec<Line> = Vec::new();
+        if let Some(note) = pair.and_then(|p| p.note.as_ref()) {
+            foot.push(Line::from(Span::styled(
+                format!("note: {note}"),
+                theme.muted(),
+            )));
+        }
+        if let Some(f) = c.confirm {
+            foot.push(Line::from(Span::styled(
+                format!("Retire {} to ~/.ssh/retired/? [y/N]", self.ws.display(f)),
+                bold,
+            )));
+        }
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(foot.len() as u16)])
+            .split(inner);
+        frame.render_widget(Paragraph::new(foot), parts[1]);
+        let body = parts[0];
+        match (&c.view, pair) {
+            (View::Pair, Some(p)) => self.render_pair(frame, body, p),
+            (View::Keys(picks), Some(p)) => {
+                let mut lines = vec![Line::from(Span::styled(
+                    format!("  {:<22}{:<40}{:<40}pick", "key", "live", "copy"),
+                    bold,
+                ))];
+                for (i, k) in p.keys.iter().enumerate() {
+                    let show = |v: &[String]| {
+                        if v.is_empty() {
+                            theme.missing().to_string()
+                        } else {
+                            v.join(", ")
+                        }
+                    };
+                    let pick = match picks.get(i) {
+                        Some(Pick::Live) => "live",
+                        Some(Pick::Copy) => "copy",
+                        None if i == picks.len() => "l / c ?",
+                        None => "",
+                    };
+                    let marker = if i == picks.len() { ">" } else { " " };
+                    let text = format!(
+                        "{marker} {:<22}{:<40}{:<40}{pick}",
+                        k.key,
+                        elide_start(&show(&k.live), 38, theme.ellipsis()),
+                        elide_start(&show(&k.copy), 38, theme.ellipsis())
+                    );
+                    lines.push(if i == picks.len() {
+                        Line::from(Span::styled(text, bold))
+                    } else {
+                        Line::from(text)
+                    });
+                }
+                frame.render_widget(Paragraph::new(lines), body);
+            }
+            _ => self.render_conflict_list(frame, body, c),
+        }
+    }
+
+    fn render_conflict_list(&self, frame: &mut Frame, area: Rect, c: &Conflicts) {
+        let theme = self.opts.theme;
+        if c.rows.is_empty() {
+            frame.render_widget(
+                Paragraph::new("no host is defined in two workspace files."),
+                area,
+            );
+            return;
+        }
+        let w = |n: u16| ((area.width.saturating_sub(4) * n) / 100) as usize;
+        let (hw, fw) = (w(20), w(28));
+        let header = format!("  {:<hw$}{:<fw$}{:<fw$}kind", "host", "live", "copy");
+        let mut lines = vec![Line::from(Span::styled(
+            header,
+            Style::default().add_modifier(Modifier::BOLD),
+        ))];
+        let room = (area.height as usize).saturating_sub(1).max(1);
+        let top = c.sel.saturating_sub(room - 1);
+        for (i, item) in c.rows.iter().enumerate().skip(top).take(room) {
+            let cut = |s: &str, n: usize| elide_start(s, n.saturating_sub(1), theme.ellipsis());
+            let text = match c.pair_of(*item) {
+                Some(p) => {
+                    let live = p.live.as_ref().map_or(theme.missing().to_string(), |l| {
+                        format!("{}:{}", l.label, l.line)
+                    });
+                    let copy = format!("{}:{}", p.copy.label, p.copy.line);
+                    format!(
+                        "  {:<hw$}{:<fw$}{:<fw$}{}",
+                        cut(&p.name, hw),
+                        cut(&live, fw),
+                        cut(&copy, fw),
+                        c.class(p)
+                    )
+                }
+                None => {
+                    let Item::File(f) = item else { continue };
+                    format!(
+                        "  {:<hw$}{:<fw$}{:<fw$}nothing left to decide; R retires it",
+                        theme.missing(),
+                        theme.missing(),
+                        cut(&self.ws.display(*f), fw)
+                    )
+                }
+            };
+            let style = if i == c.sel {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(text, style)));
+        }
+        frame.render_widget(Paragraph::new(lines), area);
+    }
+
+    /// The live block left, the copy right; lines the other side lacks
+    /// stand out. The differing keys follow.
+    fn render_pair(&self, frame: &mut Frame, area: Rect, p: &rustorm_core::Pair) {
+        let theme = self.opts.theme;
+        let keys_height = if p.keys.is_empty() {
+            0
+        } else {
+            p.keys.len() as u16 + 1
+        };
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(keys_height)])
+            .split(area);
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(rows[0]);
+        let live_text = p.live.as_ref().map_or("", |l| l.text.as_str());
+        let side = |title: String, text: &str, other: &str, style: Style| {
+            let lines: Vec<Line> = marked_lines(text, other)
+                .into_iter()
+                .map(|(l, differs)| {
+                    if differs {
+                        Line::from(Span::styled(l, style))
+                    } else {
+                        Line::from(l)
+                    }
+                })
+                .collect();
+            Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title))
+        };
+        let live = match &p.live {
+            Some(l) => side(
+                format!(" live {}:{} ", l.label, l.line),
+                live_text,
+                &p.copy.text,
+                theme.error(),
+            ),
+            None => Paragraph::new(Span::styled("no other file defines it", theme.muted()))
+                .block(Block::default().borders(Borders::ALL).title(" live ")),
+        };
+        frame.render_widget(live, cols[0]);
+        frame.render_widget(
+            side(
+                format!(" copy {}:{} ", p.copy.label, p.copy.line),
+                &p.copy.text,
+                live_text,
+                theme.success().add_modifier(Modifier::BOLD),
+            ),
+            cols[1],
+        );
+        if !p.keys.is_empty() {
+            let mut lines = vec![Line::from(Span::styled(
+                "differs in:",
+                Style::default().add_modifier(Modifier::BOLD),
+            ))];
+            for k in &p.keys {
+                let show = |v: &[String]| {
+                    if v.is_empty() {
+                        theme.missing().to_string()
+                    } else {
+                        v.join(", ")
+                    }
+                };
+                lines.push(Line::from(format!(
+                    "  {}: {} | {}",
+                    k.key,
+                    show(&k.live),
+                    show(&k.copy)
+                )));
+            }
+            frame.render_widget(Paragraph::new(lines), rows[1]);
+        }
     }
 
     fn render_form(&self, frame: &mut Frame, area: Rect, form: &Form) {
