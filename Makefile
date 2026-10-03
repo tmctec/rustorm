@@ -73,6 +73,14 @@ test-meta:  ## Run the host-metadata and reading-output suites across core, TUI 
 	@./makehelp.sh test -p rustorm-tui --test meta
 	@./makehelp.sh test -p rustorm-gui --test meta
 
+.PHONY: test-reconcile
+test-reconcile:  ## Run the reconcile suites across core, CLI, TUI, GUI and parity (rec-*, rcl-*, rct-*, rcg-*, par-16..18)
+	@./makehelp.sh test -p rustorm-core --test reconcile
+	@./makehelp.sh test -p rustorm --test cli_cases rcl_
+	@./makehelp.sh test -p rustorm-tui --test reconcile
+	@./makehelp.sh test -p rustorm-gui --test reconcile
+	@./makehelp.sh test -p rustorm-parity --test parity -- par_16 par_17 par_18
+
 .PHONY: test-cli
 test-cli:  ## Run the rustorm CLI tests, including every docs/cli.md example
 	@./makehelp.sh test -p rustorm
@@ -88,7 +96,7 @@ test-gui:  ## Run the rustorm-gui kittest suite
 GUI_WALKTHROUGH ?= target/gui-walkthrough.txt
 
 .PHONY: test-parity
-test-parity:  ## Run the same 15 operations in the TUI and the GUI and compare the files they write
+test-parity:  ## Run the same 18 operations in the TUI and the GUI (and the CLI for reconcile) and compare the files they write
 	@./makehelp.sh test -p rustorm-parity
 
 .PHONY: fixtures-read
@@ -96,7 +104,7 @@ fixtures-read: build  ## Regenerate the docs/cli.md Reading output fixtures with
 	@./scripts/make-read-fixtures.sh
 
 .PHONY: test-gui-walkthrough
-test-gui-walkthrough:  ## Drive the GUI follow, settings (filled/all, Add setting, Notes & location) and editor completion flows; write what they show to GUI_WALKTHROUGH
+test-gui-walkthrough:  ## Drive the GUI follow, settings (filled/all, Add setting, Notes & location), Conflicts and editor completion flows; write what they show to GUI_WALKTHROUGH
 	@RUSTORM_GUI_EVIDENCE=$(abspath $(GUI_WALKTHROUGH)) ./makehelp.sh test -p rustorm-gui --test settings gui_walkthrough -- --ignored
 	@echo "walkthrough written to $(GUI_WALKTHROUGH)"
 

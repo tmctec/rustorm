@@ -116,6 +116,20 @@ rustorm add-section evant --file df-evant               # creates the section in
 rustorm dump --file cypress                             # print one included file
 ```
 
+### Cleaning up backups and duplicate hosts
+
+A wildcard `Include` loads every file in its directory, backups and old copies included, so ssh may be reading a host from a file you forgot about. `rustorm reconcile` sorts that out host by host. For each host defined in two files it compares the first one ssh reads (the **live** definition) with the later one (the **copy**): if they match apart from comments and spacing they are **identical**; otherwise they **conflict** (a different note, location or tag counts as a difference).
+
+```
+rustorm reconcile --list                                # what conflicts, what is identical, a diff for each conflict
+rustorm reconcile                                       # on a terminal: each conflict side by side, choose live, copy, or key by key
+rustorm reconcile old --drop-identical                  # remove the copies in `old` that match the live definition
+rustorm reconcile old --take-copy P62 --all-live        # P62 takes the copy's settings; every other conflict keeps the live one
+rustorm reconcile old --add printer --retire            # keep the host only `old` defines, then retire `old`
+```
+
+Naming a file (`old`) limits the work to the copies in it and also shows its **orphans**, hosts no other file defines: `--add` moves one into your main config, `--keep-live` leaves it out. Once every host in the file is decided, `--retire` moves the file to `~/.ssh/retired/`, out of the `Include` wildcard; nothing is ever deleted, and every file written is backed up first. The terminal UI (`C`) and the desktop app (**Conflicts…** in the sidebar) do the same with the two definitions shown side by side.
+
 `rustorm check` also reports a host defined in two files (ssh uses the first), an `Include` that loads a file that looks like a backup (`.bak`, `.orig`, `~`), an `Include` placed inside `Host *` (rustorm treats it as global), and an included file it cannot read. Each file written is backed up beside it first. When a wildcard in an `Include` would match that backup, rustorm names it `.<file>~` instead (`~/.ssh/config.d/.cypress~`) so neither ssh nor rustorm ever loads a backup as a config.
 
 ## Terminal UI
@@ -134,6 +148,7 @@ rustorm dump --file cypress                             # print one included fil
 | `R` on a section | Rename the section |
 | `n` | Create an empty section |
 | `F` | Focus the file list (shown when the config includes other files); the editor shows the highlighted file, and `Enter` moves into it |
+| `C` | Open Conflicts (when the config includes other files): each host defined in two files, side by side; keep the live one, take the copy, or go key by key, drop identical copies, retire a backup |
 | `o` | Open the editor at the selected host, in the file that holds it |
 | `Ctrl-S` / `Ctrl-R` | In the editor: save, or discard and reload |
 | `Esc` | Cancel a form or prompt, or leave the editor |
