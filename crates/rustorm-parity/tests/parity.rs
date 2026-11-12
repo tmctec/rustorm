@@ -1,10 +1,12 @@
-//! TUI / GUI parity (catalog par-1 .. par-18): each scenario runs one
+//! TUI / GUI parity (catalog par-1 .. par-22): each scenario runs one
 //! operation in `rustorm-tui` (key events) and in `rustorm-gui` (kittest
 //! clicks and typing) on identical workspaces, and in `rustorm-core`
 //! directly on a third copy. All three must leave byte-identical files
 //! and backups, and the two UIs must report the same message. The
-//! reconcile scenarios (par-16 ..) also run the `rustorm` binary on a
-//! fourth copy under a temporary HOME.
+//! reconcile (par-16 .. par-18), combine (par-19, par-20) and cleanup
+//! (par-21, par-22) scenarios also run the `rustorm` binary on a fourth
+//! copy under a temporary HOME. Cleanup probes on every surface are the
+//! real TCP connect against a `127.0.0.1` listener and a closed port.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -1308,4 +1310,578 @@ fn par_18_stale_refused() {
     assert_eq!(p.t.snapshot(), want, "the TUI wrote");
     assert_eq!(p.g.snapshot(), want, "the GUI wrote");
     assert_eq!(l.snapshot(), want, "the CLI wrote");
+}
+
+// ----- combine and cleanup: the CLI, the TUI's views, the GUI's dialogs -----
+
+/// The combine example: the root includes `~/.ssh/config.d/*`, which holds
+/// `extra` (vps, a conflict with the root) and `legacy` (nas, a conflict
+/// with the root, and a `Host *` the root's merges with).
+const COMBINE_ROOT: &str = "Include ~/.ssh/config.d/*\n\nHost *\n    ServerAliveInterval 30\n\nHost nas\n    HostName nas.local\n\nHost vps\n    HostName vps.example.com\n    User root\n";
+const EXTRA: &str = "Host vps\n    HostName old-vps.example.com\n    User admin\n\nHost cam\n    HostName 192.168.1.30\n";
+const LEGACY: &str = "Host *\n    ServerAliveInterval 60\n    Compression yes\n\nHost nas\n    HostName 192.168.1.10\n\nHost printer\n    HostName 192.168.1.20\n";
+
+/// A `127.0.0.1` port that accepts every connection, and one that refuses
+/// them, shared by every cleanup fixture of this process so that the four
+/// copies of a workspace name the same ports. Every surface probes them
+/// with the real TCP connect `rustorm cleanup` makes.
+#[derive(Clone, Copy)]
+struct Ports {
+    open: u16,
+    closed: u16,
+}
+
+fn ports() -> &'static Ports {
+    static PORTS: OnceLock<Ports> = OnceLock::new();
+    PORTS.get_or_init(|| {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let open = listener.local_addr().unwrap().port();
+        // Accept and drop, so the backlog never fills.
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                drop(conn);
+            }
+        });
+        let closed = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        Ports { open, closed }
+    })
+}
+
+fn tcp_host(name: &str, port: u16, user: &str) -> String {
+    format!("Host {name}\n    HostName 127.0.0.1\n    Port {port}\n    User {user}\n")
+}
+
+impl Fixture {
+    /// Writes `files` (relative to the home) under a temporary home whose
+    /// root is `~/.ssh/config`.
+    fn home(files: &[(&str, String)]) -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        for (rel, text) in files {
+            let p = dir.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        }
+        Fixture {
+            root: dir.path().join(".ssh/config"),
+            home: Some(dir.path().to_path_buf()),
+            dir,
+        }
+    }
+
+    /// The combine example under a temporary home.
+    fn combine() -> Fixture {
+        Fixture::home(&[
+            (".ssh/config", COMBINE_ROOT.to_string()),
+            (".ssh/config.d/extra", EXTRA.to_string()),
+            (".ssh/config.d/legacy", LEGACY.to_string()),
+        ])
+    }
+
+    /// The cleanup example under a temporary home: `vps` live in
+    /// `config.d/vps` on the closed port and its copy in `config.d/vps.bak`
+    /// on the open one (only the copy works); `db` identical in both; `nas`
+    /// defined twice in the root (a dead block); `web` and `web-prod` with
+    /// the same target.
+    fn cleanup() -> Fixture {
+        let Ports { open, closed } = *ports();
+        let db = tcp_host("db", open, "postgres");
+        let nas = tcp_host("nas", open, "storage");
+        Fixture::home(&[
+            (
+                ".ssh/config",
+                format!(
+                    "Include ~/.ssh/config.d/*\n\n{nas}\n{}\n{}\nHost nas\n    HostName 127.0.0.1\n",
+                    tcp_host("web", open, "deploy"),
+                    tcp_host("web-prod", open, "deploy"),
+                ),
+            ),
+            (
+                ".ssh/config.d/vps",
+                format!("{}\n{db}", tcp_host("vps", closed, "admin")),
+            ),
+            (
+                ".ssh/config.d/vps.bak",
+                format!("{}\n{db}", tcp_host("vps", open, "travis")),
+            ),
+        ])
+    }
+
+    /// The absolute path of `rel`, as text.
+    fn arg(&self, rel: &str) -> String {
+        self.file(rel).display().to_string()
+    }
+}
+
+/// [`agree`] for messages that name absolute paths: each surface's message
+/// and the CLI's output are read with its own fixture's directory as
+/// `<DIR>`.
+fn agree_in(p: &mut Pair, l: &Fixture, out: &Output) -> String {
+    let t = p.t.norm(&strip(&p.tui.message().unwrap_or_default()));
+    let g = p.g.norm(&strip(p.gui.state().status()));
+    assert_eq!(t, g, "TUI and GUI messages differ");
+    let printed = l.norm(&format!("{}{}", stdout(out), stderr(out)));
+    let lines: Vec<&str> = printed
+        .lines()
+        .map(|l| {
+            l.strip_prefix("error: ")
+                .or_else(|| l.strip_prefix("warning: "))
+                .unwrap_or(l)
+        })
+        .collect();
+    for s in t.split_inclusive(". ") {
+        let s = s.trim().strip_prefix("Warning: ").unwrap_or(s.trim());
+        assert!(lines.contains(&s), "the CLI did not say {s:?}: {printed}");
+    }
+    t
+}
+
+/// A refusal up to its remedy, which each surface phrases its own way:
+/// `vps changed since the report; run cleanup again.` reads `vps changed
+/// since the report`.
+fn refusal(s: &str) -> String {
+    strip(s).split("; ").next().unwrap_or_default().to_string()
+}
+
+/// The core's combine as `rustorm combine <inputs> --keep nas --replace vps
+/// --retire` makes it, after a preview whose fingerprints the commit
+/// checks, as the UIs do. `change` runs between the two.
+fn core_combine(f: &Fixture, change: impl FnOnce()) -> rustorm_core::Result<()> {
+    let request = rustorm_core::CombineRequest {
+        inputs: [".ssh/config", ".ssh/config.d/extra", ".ssh/config.d/legacy"]
+            .iter()
+            .map(|r| f.file(r))
+            .collect(),
+        output: None,
+        policy: rustorm_core::OnConflict::Fail,
+        decisions: rustorm_core::host_decisions(&["nas".into()], &["vps".into()]).unwrap(),
+        retire: true,
+    };
+    let home = f.home.as_deref();
+    let preview = request.preview(home)?;
+    assert!(preview.is_ready(), "every conflict is decided");
+    change();
+    request
+        .commit(Some(&preview.fingerprints), WriteOptions::default(), home)
+        .map(|_| ())
+}
+
+/// Opens the TUI's Combine view, picks `extra` and `legacy` after the
+/// root, previews, keeps nas and replaces vps.
+fn tui_combine(app: &mut Tui) {
+    press(app, 'M');
+    assert_eq!(app.view_name(), Some("combine files"));
+    for _ in 0..2 {
+        app.handle(key(KeyCode::Down));
+        press(app, ' ');
+    }
+    app.handle(key(KeyCode::Enter));
+    assert_eq!(
+        app.view_name(),
+        Some("combine preview"),
+        "{:?}",
+        app.message()
+    );
+    for (host, k) in [("nas", 'k'), ("vps", 'r')] {
+        press(app, 'g');
+        for _ in 0..10 {
+            if app.combine_conflict().as_deref() == Some(host) {
+                break;
+            }
+            app.handle(key(KeyCode::Down));
+        }
+        assert_eq!(app.combine_conflict().as_deref(), Some(host));
+        press(app, k);
+    }
+}
+
+/// Opens the GUI's Combine dialog, chooses `extra` and `legacy`, keeps nas
+/// and replaces vps.
+fn gui_combine(h: &mut Harness<'static, Gui>) {
+    click(h, "Combine…");
+    assert!(h.state().combine().is_some(), "the dialog opens");
+    click(h, "Merge ~/.ssh/config.d/extra");
+    click(h, "Merge ~/.ssh/config.d/legacy");
+    click(h, "Keep nas");
+    click(h, "Replace vps");
+}
+
+/// par-19: combine the root with two inputs, two conflicts decided keep
+/// and replace, retire on — through CLI flags, TUI keys, GUI clicks and the
+/// core's preview and commit — leaves byte-identical trees, the backup and
+/// both retired inputs included, and the same message.
+// TESTMASTER: id=par-19 tier=? parallel=yes
+#[test]
+fn par_19_combine_decide_and_retire() {
+    let mut p = Pair::of(Fixture::combine);
+    let l = Fixture::combine();
+
+    tui_combine(&mut p.tui);
+    press(&mut p.tui, 'R');
+    p.tui.handle(key(KeyCode::Enter));
+    assert_eq!(p.tui.view_name(), None, "{:?}", p.tui.message());
+
+    gui_combine(&mut p.gui);
+    click(&mut p.gui, "Retire merged files");
+    click(&mut p.gui, "Write");
+    assert!(p.gui.state().combine().is_none(), "the dialog closes");
+
+    let out = cli(
+        &l,
+        &[
+            "combine",
+            &l.arg(".ssh/config"),
+            &l.arg(".ssh/config.d/extra"),
+            &l.arg(".ssh/config.d/legacy"),
+            "--keep",
+            "nas",
+            "--replace",
+            "vps",
+            "--retire",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let said = agree_in(&mut p, &l, &out);
+    assert!(
+        said.contains("combined 3 files into <DIR>/.ssh/config:"),
+        "{said}"
+    );
+    assert!(
+        said.ends_with("<DIR>/.ssh/config.d/legacy retired to <DIR>/.ssh/retired/legacy."),
+        "{said}"
+    );
+
+    core_combine(&p.c, || {}).unwrap();
+    p.same_files();
+    assert_eq!(
+        l.snapshot(),
+        p.c.snapshot(),
+        "CLI files differ from the core's"
+    );
+    let tree = p.c.snapshot();
+    assert!(!tree.contains_key(".ssh/config.d/extra"), "{tree:?}");
+    assert!(!tree.contains_key(".ssh/config.d/legacy"), "{tree:?}");
+    assert_eq!(tree[".ssh/retired/extra"], EXTRA);
+    assert_eq!(tree[".ssh/retired/legacy"], LEGACY);
+    assert_eq!(tree[".ssh/config~"], COMBINE_ROOT);
+    let root = &tree[".ssh/config"];
+    assert!(root.contains("HostName nas.local"), "nas kept: {root}");
+    assert!(
+        root.contains("HostName old-vps.example.com"),
+        "vps replaced"
+    );
+    assert!(root.contains("Host printer\n") && root.contains("Host cam\n"));
+    assert!(root.contains("Compression yes"));
+}
+
+/// par-20: an input changed on disk after the preview is refused alike in
+/// the TUI, the GUI and the core, and nothing is written. The CLI reads and
+/// writes in one call, with no preview in between to go stale; run on the
+/// changed input it merges the new text.
+// TESTMASTER: id=par-20 tier=? parallel=yes
+#[test]
+fn par_20_combine_stale_refused() {
+    let changed = LEGACY.replace("192.168.1.20", "192.168.1.21");
+    let mut p = Pair::of(Fixture::combine);
+
+    tui_combine(&mut p.tui);
+    gui_combine(&mut p.gui);
+    for f in [&p.t, &p.g] {
+        std::fs::write(f.file(".ssh/config.d/legacy"), &changed).unwrap();
+    }
+    p.tui.handle(key(KeyCode::Enter));
+    assert_eq!(p.tui.view_name(), Some("combine preview"), "the view stays");
+    click(&mut p.gui, "Write");
+    assert!(p.gui.state().combine().is_some(), "the dialog stays");
+
+    let c = p.c.file(".ssh/config.d/legacy");
+    let err = core_combine(&p.c, || std::fs::write(&c, &changed).unwrap()).unwrap_err();
+    assert!(matches!(err, rustorm_core::Error::CombineStale(_)), "{err}");
+
+    let t = p.t.norm(&refusal(&p.tui.message().unwrap_or_default()));
+    let g = p.g.norm(&refusal(p.gui.state().status()));
+    let core = p.c.norm(&refusal(&err.to_string()));
+    assert_eq!(t, "<DIR>/.ssh/config.d/legacy changed since the preview");
+    assert_eq!(t, g, "TUI and GUI messages differ");
+    assert_eq!(t, core, "the TUI and the core differ");
+    let want = Fixture::combine();
+    std::fs::write(want.file(".ssh/config.d/legacy"), &changed).unwrap();
+    let want = want.snapshot();
+    assert_eq!(p.t.snapshot(), want, "the TUI wrote");
+    assert_eq!(p.g.snapshot(), want, "the GUI wrote");
+    assert_eq!(p.c.snapshot(), want, "the core wrote");
+
+    // The preview is read again: the next write merges the new text.
+    p.tui.handle(key(KeyCode::Enter));
+    assert_eq!(p.tui.view_name(), None, "{:?}", p.tui.message());
+    click(&mut p.gui, "Write");
+    assert!(p.gui.state().combine().is_none(), "the dialog closes");
+    let l = Fixture::combine();
+    std::fs::write(l.file(".ssh/config.d/legacy"), &changed).unwrap();
+    let out = cli(
+        &l,
+        &[
+            "combine",
+            &l.arg(".ssh/config"),
+            &l.arg(".ssh/config.d/extra"),
+            &l.arg(".ssh/config.d/legacy"),
+            "--keep",
+            "nas",
+            "--replace",
+            "vps",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    agree_in(&mut p, &l, &out);
+    assert_eq!(
+        p.t.snapshot(),
+        l.snapshot(),
+        "TUI files differ from the CLI's"
+    );
+    assert_eq!(
+        p.g.snapshot(),
+        l.snapshot(),
+        "GUI files differ from the CLI's"
+    );
+    assert!(l.snapshot()[".ssh/config"].contains("192.168.1.21"));
+}
+
+/// Steps the TUI until its probes have all landed.
+fn tui_probe(app: &mut Tui) {
+    press(app, 'p');
+    assert!(app.is_probing(), "{:?}", app.message());
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while app.is_probing() {
+        assert!(
+            std::time::Instant::now() < until,
+            "TUI probes never finished"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app.tick();
+    }
+}
+
+/// Clicks Probe in the GUI's Cleanup dialog and steps frames until every
+/// probe has landed.
+fn gui_probe(h: &mut Harness<'static, Gui>) {
+    click(h, "Probe");
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while h.state().cleanup().unwrap().probing() {
+        assert!(
+            std::time::Instant::now() < until,
+            "GUI probes never finished"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        h.step();
+    }
+    h.run();
+}
+
+/// Opens the GUI's Cleanup dialog.
+fn gui_cleanup(h: &mut Harness<'static, Gui>) {
+    h.get_all_by_label_contains("Cleanup…")
+        .last()
+        .unwrap()
+        .click();
+    h.run();
+    assert!(h.state().cleanup().is_some(), "the dialog opens");
+}
+
+/// The core's report with every definition probed by the TCP connect
+/// `rustorm cleanup` makes, each result recorded as it lands.
+fn core_probed(ws: &Workspace, f: &Fixture) -> rustorm_core::CleanupReport {
+    let mut report = ws.cleanup_report(None, &f.env());
+    let targets = report.probe_targets(rustorm_core::DEFAULT_TIMEOUT);
+    let mut results = Vec::new();
+    rustorm_core::run_probes(
+        &targets,
+        &rustorm_core::TcpProber,
+        rustorm_core::DEFAULT_JOBS,
+        None,
+        &mut |i, r| results.push((i, r)),
+    );
+    assert_eq!(results.len(), targets.len());
+    for (i, r) in &results {
+        report.record(&targets[*i], r);
+    }
+    report
+}
+
+/// par-21: cleanup — the copy that works is taken, the identical copy and
+/// the dead block dropped, then the same-target pair folded — through
+/// `rustorm cleanup --apply` and `--fold`, the TUI's `p`, `A` and `f`, the
+/// GUI's Probe, Apply all and Fold, and the core's probes, apply and fold.
+/// Every surface probes with the real TCP connect; byte-identical trees,
+/// every backup included, and the same messages.
+// TESTMASTER: id=par-21 tier=? parallel=no
+#[test]
+fn par_21_cleanup_apply_and_fold() {
+    let mut p = Pair::of(Fixture::cleanup);
+    let l = Fixture::cleanup();
+
+    // Probe, then apply every recommendation but the fold.
+    press(&mut p.tui, 'X');
+    assert_eq!(p.tui.view_name(), Some("cleanup"));
+    tui_probe(&mut p.tui);
+    gui_cleanup(&mut p.gui);
+    gui_probe(&mut p.gui);
+    let core = core_probed(&p.c.load(), &p.c);
+    let g = p.g.norm(&p.gui.state().cleanup().unwrap().report().text());
+    assert_eq!(g, p.c.norm(&core.text()), "GUI and core reports differ");
+    assert!(g.contains("take the copy; only the copy works"), "{g}");
+    let probed = cli(&l, &["cleanup"]);
+    assert_eq!(probed.status.code(), Some(1), "{}", stderr(&probed));
+    assert_eq!(l.norm(&stdout(&probed)), g, "CLI and GUI reports differ");
+
+    press(&mut p.tui, 'A');
+    click(&mut p.gui, "Apply all (3)");
+    let out = cli(&l, &["cleanup", "--apply"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let said = agree_in(&mut p, &l, &out);
+    assert!(
+        said.starts_with("vps: moved the copy from ~/.ssh/config.d/vps.bak into ~/.ssh/config.d/vps; only the copy works."),
+        "{said}"
+    );
+    assert!(said.ends_with("1 finding remains."), "{said}");
+    let mut ws = p.c.load();
+    ws.apply_cleanup(&core, &core.applicable()).unwrap();
+    ws.save(WriteOptions::default()).unwrap();
+    p.same_files();
+    assert_eq!(
+        l.snapshot(),
+        p.c.snapshot(),
+        "CLI files differ from the core's"
+    );
+
+    // Fold web-prod into web.
+    press(&mut p.tui, 'g');
+    for _ in 0..5 {
+        if p.tui
+            .cleanup_selected()
+            .is_some_and(|s| s.starts_with("same target"))
+        {
+            break;
+        }
+        p.tui.handle(key(KeyCode::Down));
+    }
+    press(&mut p.tui, 'f');
+    click(&mut p.gui, "same target: web, web-prod");
+    click(&mut p.gui, "Fold");
+    let out = cli(&l, &["cleanup", "--fold", "web-prod"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        agree_in(&mut p, &l, &out),
+        "web-prod folded into web in ~/.ssh/config. no findings remain."
+    );
+    let mut ws = p.c.load();
+    let report = ws.cleanup_report(None, &p.c.env());
+    ws.fold_host(&report, "web-prod").unwrap();
+    ws.save(WriteOptions::default()).unwrap();
+    p.same_files();
+    assert_eq!(
+        l.snapshot(),
+        p.c.snapshot(),
+        "CLI files differ from the core's"
+    );
+
+    let tree = p.c.snapshot();
+    let open = ports().open;
+    assert!(tree[".ssh/config.d/vps"].contains(&format!("Port {open}\n    User travis")));
+    assert!(!tree[".ssh/config.d/vps.bak"].contains("Host "), "{tree:?}");
+    assert!(
+        tree[".ssh/config"].contains("Host web web-prod\n"),
+        "{tree:?}"
+    );
+    assert_eq!(tree[".ssh/config"].matches("Host nas").count(), 1);
+    for backup in [
+        ".ssh/config~",
+        ".ssh/config.d/.vps~",
+        ".ssh/config.d/.vps.bak~",
+    ] {
+        assert!(tree.contains_key(backup), "{backup}: {tree:?}");
+    }
+}
+
+/// par-22: a copy changed on disk after the report is refused alike as
+/// stale in the TUI, the GUI, the CLI's terminal prompts and the core;
+/// nothing is written.
+// TESTMASTER: id=par-22 tier=? parallel=no
+#[test]
+fn par_22_cleanup_stale_refused() {
+    let changed = std::fs::read_to_string(Fixture::cleanup().file(".ssh/config.d/vps.bak"))
+        .unwrap()
+        .replacen("User travis", "User travis2", 1);
+    let mut p = Pair::of(Fixture::cleanup);
+    let l = Fixture::cleanup();
+
+    press(&mut p.tui, 'X');
+    tui_probe(&mut p.tui);
+    gui_cleanup(&mut p.gui);
+    gui_probe(&mut p.gui);
+    let core = core_probed(&p.c.load(), &p.c);
+    for f in [&p.t, &p.g, &p.c] {
+        std::fs::write(f.file(".ssh/config.d/vps.bak"), &changed).unwrap();
+    }
+    press(&mut p.tui, 'A');
+    click(&mut p.gui, "Apply all (3)");
+    let mut ws = p.c.load();
+    let err = ws.apply_cleanup(&core, &core.applicable()).unwrap_err();
+    assert!(matches!(err, rustorm_core::Error::CleanupStale(_)), "{err}");
+
+    // The CLI on a terminal: the report is probed and printed, the copy
+    // changes while the first prompt waits, then every recommendation but
+    // the fold is answered `a`.
+    let mut child = cli_cmd(&l)
+        .env("RUSTORM_ASSUME_TTY", "1")
+        .arg("cleanup")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err_pipe = child.stderr.take().unwrap();
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 256];
+    while !String::from_utf8_lossy(&seen).contains("[a]pply") {
+        let n = err_pipe.read(&mut buf).unwrap();
+        assert!(n > 0, "no prompt: {}", String::from_utf8_lossy(&seen));
+        seen.extend_from_slice(&buf[..n]);
+    }
+    std::fs::write(l.file(".ssh/config.d/vps.bak"), &changed).unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"a\na\na\ns\n").unwrap();
+    drop(input);
+    err_pipe.read_to_end(&mut seen).unwrap();
+    let mut out = child.wait_with_output().unwrap();
+    out.stderr = seen;
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+
+    let t = refusal(&p.tui.message().unwrap_or_default());
+    let g = refusal(&gui_error(&p.gui));
+    assert_eq!(t, "vps changed since the report");
+    assert_eq!(t, g, "TUI and GUI messages differ");
+    assert_eq!(t, refusal(&err.to_string()), "the TUI and the core differ");
+    assert!(
+        stderr(&out).contains(&format!("error: {err}\n")),
+        "{}",
+        stderr(&out)
+    );
+    let want = Fixture::cleanup();
+    std::fs::write(want.file(".ssh/config.d/vps.bak"), &changed).unwrap();
+    let want = want.snapshot();
+    assert_eq!(p.t.snapshot(), want, "the TUI wrote");
+    assert_eq!(p.g.snapshot(), want, "the GUI wrote");
+    assert_eq!(p.c.snapshot(), want, "the core wrote");
+    assert_eq!(l.snapshot(), want, "the CLI wrote");
+}
+
+/// The GUI Cleanup dialog's refusal, or the status line.
+fn gui_error(h: &Harness<'static, Gui>) -> String {
+    let s = h.state();
+    match s.cleanup().and_then(|v| v.error()) {
+        Some(e) => e.to_string(),
+        None => s.status().to_string(),
+    }
 }
