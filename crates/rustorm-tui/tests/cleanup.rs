@@ -197,6 +197,7 @@ fn goto(app: &mut App, head: &str) {
 }
 
 /// uicln-1
+// TESTMASTER: id=uicln-1 tier=? parallel=yes
 #[test]
 fn uicln_1_lists_the_same_findings_as_cleanup_no_probe() {
     let h = Home::new();
@@ -219,6 +220,7 @@ fn uicln_1_lists_the_same_findings_as_cleanup_no_probe() {
 }
 
 /// uicln-2
+// TESTMASTER: id=uicln-2 tier=? parallel=yes
 #[test]
 fn uicln_2_probes_off_the_ui_thread_and_statuses_land_one_by_one() {
     let h = Home::new();
@@ -260,6 +262,7 @@ fn uicln_2_probes_off_the_ui_thread_and_statuses_land_one_by_one() {
 }
 
 /// uicln-3
+// TESTMASTER: id=uicln-3 tier=? parallel=yes
 #[test]
 fn uicln_3_apply_matches_cli_apply() {
     let tui = Home::new();
@@ -284,6 +287,7 @@ fn uicln_3_apply_matches_cli_apply() {
 }
 
 /// uicln-3, one finding at a time with `a`.
+// TESTMASTER: id=uicln-3 tier=? parallel=yes
 #[test]
 fn uicln_3_apply_one_then_the_other_matches_cli_apply() {
     let tui = Home::new();
@@ -320,6 +324,7 @@ fn uicln_3_apply_one_then_the_other_matches_cli_apply() {
 }
 
 /// uicln-4
+// TESTMASTER: id=uicln-4 tier=? parallel=yes
 #[test]
 fn uicln_4_fold_matches_cli_fold() {
     let tui = Home::new();
@@ -343,6 +348,7 @@ fn uicln_4_fold_matches_cli_fold() {
 }
 
 /// uicln-5
+// TESTMASTER: id=uicln-5 tier=? parallel=yes
 #[test]
 fn uicln_5_esc_abandons_probes_and_writes_nothing() {
     let h = Home::new();
@@ -373,6 +379,7 @@ fn uicln_5_esc_abandons_probes_and_writes_nothing() {
 }
 
 /// uicln-6
+// TESTMASTER: id=uicln-6 tier=? parallel=yes
 #[test]
 fn uicln_6_no_duplicates_shows_none_and_applies_nothing() {
     let f = Fixture::new(&three_hosts());

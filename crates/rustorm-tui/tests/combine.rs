@@ -120,6 +120,7 @@ fn decide(app: &mut App) {
 }
 
 /// uicmb-1
+// TESTMASTER: id=uicmb-1 tier=? parallel=yes
 #[test]
 fn uicmb_1_lists_loaded_files_and_a_path_entry() {
     let h = Home::new();
@@ -145,6 +146,7 @@ fn uicmb_1_lists_loaded_files_and_a_path_entry() {
 }
 
 /// uicmb-2
+// TESTMASTER: id=uicmb-2 tier=? parallel=yes
 #[test]
 fn uicmb_2_preview_shows_text_defaults_and_conflicts_and_writes_nothing() {
     let h = Home::new();
@@ -173,6 +175,7 @@ fn uicmb_2_preview_shows_text_defaults_and_conflicts_and_writes_nothing() {
 }
 
 /// uicmb-3
+// TESTMASTER: id=uicmb-3 tier=? parallel=yes
 #[test]
 fn uicmb_3_decisions_match_cli() {
     let tui = Home::new();
@@ -206,6 +209,7 @@ fn uicmb_3_decisions_match_cli() {
 }
 
 /// uicmb-4
+// TESTMASTER: id=uicmb-4 tier=? parallel=yes
 #[test]
 fn uicmb_4_esc_writes_nothing() {
     let h = Home::new();
@@ -225,6 +229,7 @@ fn uicmb_4_esc_writes_nothing() {
 }
 
 /// uicmb-5
+// TESTMASTER: id=uicmb-5 tier=? parallel=yes
 #[test]
 fn uicmb_5_write_refused_until_each_conflict_is_decided() {
     let h = Home::new();
@@ -248,6 +253,7 @@ fn uicmb_5_write_refused_until_each_conflict_is_decided() {
 }
 
 /// uicmb-6
+// TESTMASTER: id=uicmb-6 tier=? parallel=yes
 #[test]
 fn uicmb_6_output_elsewhere_leaves_the_base() {
     let tui = Home::new();
@@ -274,6 +280,7 @@ fn uicmb_6_output_elsewhere_leaves_the_base() {
 }
 
 /// uicmb-7
+// TESTMASTER: id=uicmb-7 tier=? parallel=yes
 #[test]
 fn uicmb_7_retire_moves_inputs_as_cli_and_refreshes_the_table() {
     let tui = Home::new();
@@ -313,6 +320,7 @@ fn uicmb_7_retire_moves_inputs_as_cli_and_refreshes_the_table() {
 }
 
 /// uicmb-8
+// TESTMASTER: id=uicmb-8 tier=? parallel=yes
 #[test]
 fn uicmb_8_stale_input_refused_and_preview_recomputed() {
     let h = Home::new();
@@ -341,6 +349,7 @@ fn uicmb_8_stale_input_refused_and_preview_recomputed() {
 }
 
 /// uicmb-9
+// TESTMASTER: id=uicmb-9 tier=? parallel=yes
 #[test]
 fn uicmb_9_refused_while_the_editor_holds_unsaved_text() {
     let h = Home::new();

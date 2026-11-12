@@ -84,6 +84,7 @@ fn tree(root: &std::path::Path) -> std::collections::BTreeMap<std::path::PathBuf
 /// tests/pty_flows.exp: Combine and Cleanup leave the files the CLI leaves.
 /// The CLI is the `rustorm` binary beside `rustorm-tui` when it is built,
 /// else the core calls it makes.
+// TESTMASTER: id=uicmb-3,uicmb-7,uicln-3 tier=? parallel=no
 #[test]
 fn ui_flows_pty_combine_and_cleanup_match_cli() {
     if Command::new("expect").arg("-v").output().is_err() {
