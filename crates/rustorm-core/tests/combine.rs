@@ -1,5 +1,6 @@
 //! `combine` and `add-section` in rustorm-core: one exact-text test per
-//! catalog case combine-1..12 and addsec-1..5 (plan carp, step 2).
+//! catalog case combine-1..12 and addsec-1..5 (plan carp, step 2), and
+//! cmb-1..9 for per-host decisions and `--retire` (plan coati, step 4).
 
 use std::path::{Path, PathBuf};
 
@@ -451,4 +452,257 @@ fn addsec_5_an_empty_section_survives_a_write_and_takes_its_first_host() {
             banner("other")
         )
     );
+}
+
+// ----- per-host decisions and --retire: cmb-1..cmb-9 (plan coati, step 4) -----
+
+fn decisions(keep: &[&str], replace: &[&str]) -> HostDecisions {
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    host_decisions(&s(keep), &s(replace)).unwrap()
+}
+
+/// A home with `~/.ssh/config` (`Include config.d/*`, host `base`) and
+/// `~/.ssh/config.d/extra` (host `extra`).
+struct Home {
+    dir: tempfile::TempDir,
+}
+
+const HOME_BASE: &str = "Include config.d/*\n\nHost base\n    HostName base.example.com\n";
+const HOME_EXTRA: &str = "Host extra\n    HostName extra.example.com\n";
+
+impl Home {
+    fn new() -> Home {
+        let h = Home {
+            dir: tempfile::tempdir().unwrap(),
+        };
+        h.write(".ssh/config", HOME_BASE);
+        h.write(".ssh/config.d/extra", HOME_EXTRA);
+        h
+    }
+
+    fn path(&self, rel: &str) -> PathBuf {
+        self.dir.path().join(rel)
+    }
+
+    fn write(&self, rel: &str, text: &str) {
+        let p = self.path(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+
+    fn read(&self, rel: &str) -> String {
+        std::fs::read_to_string(self.path(rel)).unwrap()
+    }
+
+    fn request(&self, inputs: &[&str], retire: bool) -> CombineRequest {
+        CombineRequest {
+            inputs: inputs.iter().map(|r| self.path(r)).collect(),
+            retire,
+            ..CombineRequest::default()
+        }
+    }
+
+    fn commit(&self, req: &CombineRequest) -> Result<CombineOutcome> {
+        req.commit(None, WriteOptions::default(), Some(self.dir.path()))
+    }
+}
+
+const TWO_A: &str = "Host a\n    HostName a1\n\nHost b\n    HostName b1\n";
+const TWO_B: &str = "Host a\n    HostName a2\n\nHost b\n    HostName b2\n";
+
+// TESTMASTER: id=rustorm-core::cmb_1_keep_and_replace_override_the_policy_per_host tier=? parallel=yes
+#[test]
+fn cmb_1_keep_and_replace_override_the_policy_per_host() {
+    let inputs = vec![input("one", TWO_A), input("two", TWO_B)];
+    let (result, report) = combine_with(
+        inputs,
+        OnConflict::Fail,
+        &decisions(&["a"], &["b"]),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        result.render(),
+        "Host a\n    HostName a1\n\nHost b\n    HostName b2\n"
+    );
+    assert_eq!(report.conflicts.len(), 2);
+    // A per-host decision wins over --on-conflict replace too.
+    let inputs = vec![input("one", TWO_A), input("two", TWO_B)];
+    let (result, _) =
+        combine_with(inputs, OnConflict::Replace, &decisions(&["a"], &[]), None).unwrap();
+    assert_eq!(
+        result.render(),
+        "Host a\n    HostName a1\n\nHost b\n    HostName b2\n"
+    );
+    // The preview shows both blocks and each decision.
+    let h = Home::new();
+    h.write("one", TWO_A);
+    h.write("two", TWO_B);
+    let req = CombineRequest {
+        decisions: decisions(&["a"], &[]),
+        ..h.request(&["one", "two"], false)
+    };
+    let p = req.preview(None).unwrap();
+    assert_eq!(p.conflicts.len(), 2);
+    assert_eq!(
+        (p.conflicts[0].name.as_str(), p.conflicts[0].decision, p.conflicts[0].explicit),
+        ("a", Some(HostDecision::Keep), true)
+    );
+    assert_eq!(p.conflicts[0].second_text, "Host a\n    HostName a2\n");
+    assert_eq!(p.undecided().len(), 1);
+    assert!(!p.is_ready());
+    assert_eq!(p.fingerprints.len(), 2);
+    // A changed input refuses the commit as stale; nothing is written.
+    h.write("two", "Host a\n    HostName a3\n");
+    let full = CombineRequest {
+        decisions: decisions(&["a"], &["b"]),
+        ..h.request(&["one", "two"], false)
+    };
+    let err = full
+        .commit(Some(&p.fingerprints), WriteOptions::default(), None)
+        .unwrap_err();
+    assert_eq!(err.exit_code(), 1);
+    assert!(err.to_string().ends_with("two changed since the preview; preview again."));
+    assert_eq!(h.read("one"), TWO_A);
+}
+
+// TESTMASTER: id=rustorm-core::cmb_2_an_unnamed_conflict_under_fail_writes_nothing tier=? parallel=yes
+#[test]
+fn cmb_2_an_unnamed_conflict_under_fail_writes_nothing() {
+    let h = Home::new();
+    h.write("one", TWO_A);
+    h.write("two", TWO_B);
+    let req = CombineRequest {
+        decisions: decisions(&["a"], &[]),
+        ..h.request(&["one", "two"], false)
+    };
+    let err = h.commit(&req).unwrap_err();
+    assert_eq!(err.exit_code(), 1);
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "1 conflict is left undecided; nothing written. Name it with --keep or --replace, or use --on-conflict keep or replace.\n  b: {}, {}",
+            h.path("one").display(),
+            h.path("two").display()
+        )
+    );
+    assert_eq!(h.read("one"), TWO_A);
+    assert!(!h.path("one~").exists());
+}
+
+// TESTMASTER: id=rustorm-core::cmb_3_a_named_host_that_is_no_conflict_is_a_usage_error tier=? parallel=yes
+#[test]
+fn cmb_3_a_named_host_that_is_no_conflict_is_a_usage_error() {
+    let inputs = vec![input("one", "Host nas\n"), input("two", "Host vps\n")];
+    let err = combine_with(inputs, OnConflict::Fail, &decisions(&["nas"], &[]), None).unwrap_err();
+    assert_eq!(err.exit_code(), 2);
+    assert_eq!(
+        err.to_string(),
+        "nas is not a conflict; --keep and --replace name a host two files define."
+    );
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let twice = host_decisions(&s(&["a"]), &s(&["a"])).unwrap_err();
+    assert_eq!((twice.exit_code(), twice.to_string()), (2, "a is decided twice.".to_string()));
+}
+
+// TESTMASTER: id=rustorm-core::cmb_4_retire_moves_an_included_input_into_a_private_retired_dir tier=? parallel=yes
+#[test]
+#[cfg(unix)]
+fn cmb_4_retire_moves_an_included_input_into_a_private_retired_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = Home::new();
+    let out = h.commit(&h.request(&[".ssh/config", ".ssh/config.d/extra"], true)).unwrap();
+    assert_eq!(
+        h.read(".ssh/config"),
+        format!("{HOME_BASE}\n{HOME_EXTRA}")
+    );
+    let to = h.path(".ssh/retired/extra");
+    assert_eq!(
+        out.retired,
+        [CombineRetired {
+            from: h.path(".ssh/config.d/extra"),
+            to: Some(to.clone())
+        }]
+    );
+    assert_eq!(
+        out.retired[0].message(),
+        format!("{} retired to {}.", h.path(".ssh/config.d/extra").display(), to.display())
+    );
+    assert!(!h.path(".ssh/config.d/extra").exists());
+    assert_eq!(std::fs::read_to_string(&to).unwrap(), HOME_EXTRA);
+    let mode = std::fs::metadata(h.path(".ssh/retired")).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
+    assert_eq!(h.read(".ssh/config~"), HOME_BASE);
+}
+
+// TESTMASTER: id=rustorm-core::cmb_5_without_retire_no_file_moves tier=? parallel=yes
+#[test]
+fn cmb_5_without_retire_no_file_moves() {
+    let h = Home::new();
+    let out = h.commit(&h.request(&[".ssh/config", ".ssh/config.d/extra"], false)).unwrap();
+    assert!(out.retired.is_empty());
+    assert_eq!(h.read(".ssh/config.d/extra"), HOME_EXTRA);
+    assert!(!h.path(".ssh/retired").exists());
+}
+
+// TESTMASTER: id=rustorm-core::cmb_6_an_input_no_include_loads_stays_and_says_so tier=? parallel=yes
+#[test]
+fn cmb_6_an_input_no_include_loads_stays_and_says_so() {
+    let h = Home::new();
+    h.write("old/hosts", "Host old\n    HostName old.example.com\n");
+    let out = h
+        .commit(&h.request(&[".ssh/config", "old/hosts", ".ssh/config.d/extra"], true))
+        .unwrap();
+    assert_eq!(out.retired.len(), 2);
+    assert_eq!(out.retired[0].to, None);
+    assert_eq!(
+        out.retired[0].message(),
+        format!("{}: no Include loads it; not retired.", h.path("old/hosts").display())
+    );
+    assert!(h.path("old/hosts").exists());
+    assert_eq!(out.retired[1].to, Some(h.path(".ssh/retired/extra")));
+}
+
+// TESTMASTER: id=rustorm-core::cmb_7_a_failed_write_retires_nothing tier=? parallel=no
+#[test]
+#[cfg(unix)]
+fn cmb_7_a_failed_write_retires_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = Home::new();
+    std::fs::create_dir_all(h.path("ro")).unwrap();
+    std::fs::set_permissions(h.path("ro"), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let req = CombineRequest {
+        output: Some(h.path("ro/out")),
+        ..h.request(&[".ssh/config", ".ssh/config.d/extra"], true)
+    };
+    let err = h.commit(&req).unwrap_err();
+    std::fs::set_permissions(h.path("ro"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(err.exit_code(), 3);
+    assert_eq!(h.read(".ssh/config.d/extra"), HOME_EXTRA);
+    assert!(!h.path(".ssh/retired").exists());
+    assert!(!h.path("ro/out").exists());
+}
+
+// TESTMASTER: id=rustorm-core::cmb_8_retire_with_stdout_is_a_usage_error tier=? parallel=yes
+#[test]
+fn cmb_8_retire_with_stdout_is_a_usage_error() {
+    let h = Home::new();
+    let err = h
+        .request(&[".ssh/config", ".ssh/config.d/extra"], true)
+        .render(Some(h.dir.path()))
+        .unwrap_err();
+    assert_eq!(err.exit_code(), 2);
+    assert_eq!(err.to_string(), "--retire moves files after a write; drop --stdout.");
+    assert_eq!(h.read(".ssh/config.d/extra"), HOME_EXTRA);
+}
+
+// TESTMASTER: id=rustorm-core::cmb_9_a_taken_retired_name_gets_a_numeric_suffix tier=? parallel=yes
+#[test]
+fn cmb_9_a_taken_retired_name_gets_a_numeric_suffix() {
+    let h = Home::new();
+    h.write(".ssh/retired/extra", "older\n");
+    let out = h.commit(&h.request(&[".ssh/config", ".ssh/config.d/extra"], true)).unwrap();
+    assert_eq!(out.retired[0].to, Some(h.path(".ssh/retired/extra.1")));
+    assert_eq!(h.read(".ssh/retired/extra"), "older\n");
+    assert_eq!(h.read(".ssh/retired/extra.1"), HOME_EXTRA);
 }
