@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use egui::{Button, Label, RichText, TextEdit, Ui};
 use rustorm_core::{
-    CombinePreview, CombineRequest, Error, HostDecision, HostDecisions, OnConflict, WriteOptions,
+    CombinePreview, CombineRequest, Error, HostDecision, HostDecisions, OnConflict,
 };
 
 use super::{set_label, App};
@@ -198,7 +198,7 @@ impl App {
         if self.editor_dirty() {
             return;
         }
-        let home = self.env.home.clone();
+        let home = self.home();
         let files = self
             .load_indices()
             .into_iter()
@@ -292,7 +292,7 @@ impl App {
 
     fn draw_combine(&mut self, ui: &mut Ui) -> Option<Action> {
         let blocked = self.editor_dirty();
-        let home = self.env.home.clone();
+        let home = self.home();
         let home = home.as_deref();
         let view = self.combine.as_mut()?;
         let mut action = None;
@@ -445,7 +445,7 @@ impl App {
     }
 
     fn combine_action(&mut self, action: Action) {
-        let home = self.env.home.clone();
+        let home = self.home();
         let home = home.as_deref();
         let Some(view) = &mut self.combine else {
             return;
@@ -511,7 +511,7 @@ impl App {
     /// does, then reloads the workspace.
     fn write_combine(&mut self) {
         let blocked = self.editor_dirty();
-        let home = self.env.home.clone();
+        let home = self.home();
         let home = home.as_deref();
         let Some(view) = &mut self.combine else {
             return;
@@ -525,7 +525,7 @@ impl App {
         let request = view.request(view.decisions.clone(), home);
         let output = view.output_path(home);
         let existed = output.exists();
-        match request.commit(Some(&preview.fingerprints), WriteOptions::default(), home) {
+        match request.commit(Some(&preview.fingerprints), self.write, home) {
             Ok(outcome) => {
                 let mut lines: Vec<String> = Vec::new();
                 for a in &outcome.report.added {
@@ -545,10 +545,24 @@ impl App {
                         k.kept
                     ));
                 }
+                let moved = |p: &Path| {
+                    outcome
+                        .retired
+                        .iter()
+                        .any(|r| r.to.is_some() && r.from == p)
+                };
+                for w in outcome.report.includes.iter().filter(|w| !moved(&w.loads)) {
+                    lines.push(format!(
+                        "Warning: Include {} in {} still loads {}.",
+                        w.pattern,
+                        w.file.display(),
+                        w.loads.display()
+                    ));
+                }
                 lines.push(outcome.report.summary(Some(&outcome.output)));
                 lines.extend(outcome.retired.iter().map(|r| r.message()));
                 self.combine = None;
-                if existed {
+                if existed && !self.write.no_backup {
                     let backup = rustorm_core::backup_path(&outcome.output);
                     if backup.exists() {
                         self.last_backup = Some(backup);

@@ -3,16 +3,24 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: rustorm-gui [--config <FILE>]
+const USAGE: &str = "usage: rustorm-gui [--config <FILE>] [--no-backup]
 
 Options:
   -c, --config <FILE>  the ssh config to edit (default: $RUSTORM_CONFIG, then ~/.ssh/config)
+      --no-backup      write without the <file>~ backup
   -h, --help           print this help
   -V, --version        print the version";
 
-fn parse_args() -> Result<Option<PathBuf>, String> {
+/// The parsed flags: the config path and whether to skip backups.
+struct Args {
+    config: Option<PathBuf>,
+    no_backup: bool,
+}
+
+fn parse_args() -> Result<Args, String> {
     let mut args = std::env::args().skip(1);
     let mut config = None;
+    let mut no_backup = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => {
@@ -29,26 +37,29 @@ fn parse_args() -> Result<Option<PathBuf>, String> {
             s if s.starts_with("--config=") => {
                 config = Some(PathBuf::from(&s["--config=".len()..]));
             }
+            "--no-backup" => no_backup = true,
             other => return Err(format!("unexpected argument {other}")),
         }
     }
-    Ok(config)
+    Ok(Args { config, no_backup })
 }
 
 fn main() -> ExitCode {
-    let flag = match parse_args() {
+    let args = match parse_args() {
         Ok(f) => f,
         Err(e) => {
             eprintln!("error: {e}\n\n{USAGE}");
             return ExitCode::from(2);
         }
     };
-    let Some(path) = rustorm_core::resolve_config_path(flag.as_deref()) else {
+    let Some(path) = rustorm_core::resolve_config_path(args.config.as_deref()) else {
         eprintln!("error: no home directory; give --config <FILE>");
         return ExitCode::from(3);
     };
     let app = match rustorm_gui::App::new(path) {
-        Ok(a) => a,
+        Ok(a) => a.with_write_options(rustorm_core::WriteOptions {
+            no_backup: args.no_backup,
+        }),
         Err(e) => {
             eprintln!("error: {e}");
             return ExitCode::from(3);

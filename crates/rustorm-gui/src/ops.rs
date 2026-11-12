@@ -190,7 +190,12 @@ impl Op {
     /// sequence never reaches disk. On a workspace of one file the status
     /// messages are the GUI's own; on several they are the core's, which
     /// name the file written.
-    pub fn apply(&self, ws: &mut Workspace, env: &Env) -> rustorm_core::Result<Outcome> {
+    pub fn apply(
+        &self,
+        ws: &mut Workspace,
+        env: &Env,
+        write: WriteOptions,
+    ) -> rustorm_core::Result<Outcome> {
         let multi = ws.is_multi();
         let said = |messages: Vec<String>, single: String| {
             if multi {
@@ -397,7 +402,7 @@ impl Op {
             }
             Op::Retire { file, decided } => {
                 let i = file_index(ws, file)?;
-                let change = ws.retire(i, decided, WriteOptions::default())?;
+                let change = ws.retire(i, decided, write)?;
                 Ok(Outcome {
                     message: change.messages.join(" "),
                     select: None,

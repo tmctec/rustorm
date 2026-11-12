@@ -454,3 +454,33 @@ fn uicln_6_gui_no_duplicates_shows_none_and_disables_every_action() {
     h.state_mut().open_cleanup();
     assert!(h.state().cleanup().is_none());
 }
+
+/// `--no-backup` (`App::with_write_options`): Apply all writes the same
+/// files as the CLI's `--no-backup --apply`, and no `<file>~`.
+#[test]
+fn gui_no_backup_cleanup_writes_no_backup() {
+    let gui = Home::new();
+    let cli = Home::new();
+    let app = App::with_env(gui.path(".ssh/config"), gui.env())
+        .unwrap()
+        .with_prober(Gated::new(true))
+        .with_write_options(WriteOptions { no_backup: true });
+    let mut h = Harness::builder()
+        .with_size([1500.0, 1000.0])
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    open(&mut h);
+    click(&mut h, "Probe");
+    wait(&mut h, "every probe", |a| !a.cleanup().unwrap().probing());
+    click(&mut h, "Apply all (2)");
+    let ws = cli.load();
+    let mut report = ws.cleanup_report(None, &cli.env());
+    let prober = Gated::new(true);
+    report.probe(prober.as_ref(), DEFAULT_TIMEOUT, DEFAULT_JOBS, None, &mut |_, _| {});
+    let mut ws = cli.load();
+    ws.apply_cleanup(&report, &report.applicable()).unwrap();
+    ws.save(WriteOptions { no_backup: true }).unwrap();
+    assert_eq!(gui.snapshot(), cli.snapshot());
+    assert!(!gui.snapshot().keys().any(|p| p.to_string_lossy().ends_with('~')));
+    assert_eq!(h.state().last_backup(), None);
+}

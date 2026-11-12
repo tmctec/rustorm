@@ -3,10 +3,10 @@
 `rustorm-gui` is the egui desktop interface to rustorm. It lists, adds, edits, clones, moves and deletes hosts, edits every keyword a host sets, creates sections, merges config files, cleans up duplicate hosts, and it edits the raw config file with ssh_config syntax highlighting. Every read and write goes through `rustorm-core`, so hand edits, comments and banners survive exactly as they do with the CLI (F-43).
 
 ```
-rustorm-gui [--config <FILE>]
+rustorm-gui [--config <FILE>] [--no-backup]
 ```
 
-`--config` defaults to `$RUSTORM_CONFIG`, then `~/.ssh/config`. A missing file opens as an empty config; nothing is created until the first save. The app logic is the library type `rustorm_gui::App`, which implements `eframe::App` and is built from a config path; `main.rs` only parses the flag and opens the window.
+`--config` defaults to `$RUSTORM_CONFIG`, then `~/.ssh/config`. `--no-backup` makes every write without the `<file>~` backup, as the CLI's `--no-backup` does. A missing file opens as an empty config; nothing is created until the first save. The app logic is the library type `rustorm_gui::App`, which implements `eframe::App` and is built from a config path; `main.rs` only parses the flag and opens the window.
 
 ## Window
 
@@ -113,7 +113,7 @@ On a workspace of several files (see `cli.md`, Included files) the GUI shows eve
 - **Retire merged files.** After the write, each merged file an `Include` still loads moves to `~/.ssh/retired/`, as `--retire` does. While it is checked, each merged file shows `moves to ~/.ssh/retired/` or `stays: no Include loads it`.
 - **Preview.** With two files chosen the dialog previews the merge and recomputes it on every change: the summary line (`combined 2 files into /home/me/.ssh/config: 4 hosts, 2 sections, 2 conflicts.`), one line per `Host *` key added or skipped, each `Include` that still loads an input, every conflict, and the merged text.
 - **Conflicts.** Each conflict shows the earlier and the later block side by side, then **Keep** (keep the earlier block, as `--keep`) and **Replace** (put the later block in its place, as `--replace`). The heading counts the conflicts still undecided.
-- **Write.** Enabled once every conflict is decided and the output is named; its hover text says what is missing. It writes through the same core call as `rustorm combine`, so the files match the CLI's byte for byte, then reads the workspace again. The status bar carries the CLI's messages: the `Host *` lines, the summary, and one line per retired file.
+- **Write.** Enabled once every conflict is decided and the output is named; its hover text says what is missing. It writes through the same core call as `rustorm combine`, so the files match the CLI's byte for byte, then reads the workspace again. The status bar carries the CLI's messages: the `Host *` lines, `Warning: Include <pattern> in <file> still loads <input>.` for each input an `Include` still loads that was not retired (the CLI prints it to stderr), the summary, and one line per retired file.
 - **Stale input.** An input that changed on disk since the preview is refused, the message names it, and the preview is read again with the decisions that still apply.
 - **Cancel.** Cancel or Esc closes the dialog; nothing is written and no backup is made.
 
@@ -126,4 +126,5 @@ On a workspace of several files (see `cli.md`, Included files) the GUI shows eve
 - **Probe.** Probe runs every probe on a background thread, eight at a time, each bounded at 5 seconds. Each status reads `probing…` until its result lands, and the dialog redraws as each one arrives, with a progress bar (`3 of 6 probed`). The default probe opens a TCP connection and sends no data; **Log in with ssh** probes with a `BatchMode` ssh login instead, as `--auth` does. Apply, Apply all and Fold wait until the probes finish.
 - **Apply.** **Apply** takes the selected finding's recommendation; **Apply all (N)** takes every recommendation except folds, as `--apply` does. **Fold** adds the other names of a same-target finding to the first name's `Host` line and removes their blocks, as `--fold` does. Each write goes through the same core calls as the CLI, with a backup, so the files match the CLI's byte for byte. The dialog stays open on the result: the CLI's messages, then `N findings remain.`, and the findings read again with the probe results of unchanged blocks kept. A block that changed on disk since the report is refused as stale.
 - **Close.** Close or Esc closes the dialog. Running probes are abandoned and nothing is written.
+- **Write options.** `App::set_write_options` (or `App::with_write_options`) sets how every write is made; `--no-backup` sets it at launch.
 - **Probers.** `App::set_prober` (or `App::with_prober`) replaces both probes with any `rustorm_core::Prober`, so tests and the parity suite probe deterministically.

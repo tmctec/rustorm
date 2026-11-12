@@ -236,6 +236,9 @@ pub struct App {
     prober: Option<Arc<dyn Prober>>,
     /// The context of the last frame, for probe threads to repaint.
     ctx: Option<egui::Context>,
+    /// How every write is made: with the `<file>~` backup unless
+    /// `--no-backup`.
+    write: WriteOptions,
     editor_error: Option<String>,
     status: String,
     last_backup: Option<PathBuf>,
@@ -289,6 +292,7 @@ impl App {
             cleanup_summary: String::new(),
             prober: None,
             ctx: None,
+            write: WriteOptions::default(),
             editor_error: None,
             status: String::new(),
             last_backup: None,
@@ -303,6 +307,32 @@ impl App {
     }
 
     // ----- state the UI and tests read -------------------------------------
+
+    /// Makes every write with `options`; `no_backup` skips the `<file>~`
+    /// backup, as `--no-backup` does.
+    pub fn set_write_options(&mut self, options: WriteOptions) {
+        self.write = options;
+    }
+
+    /// [`App::set_write_options`] as a builder.
+    pub fn with_write_options(mut self, options: WriteOptions) -> App {
+        self.write = options;
+        self
+    }
+
+    /// How every write is made.
+    pub fn write_options(&self) -> WriteOptions {
+        self.write
+    }
+
+    /// The home directory: the environment's, else `$HOME`.
+    fn home(&self) -> Option<PathBuf> {
+        self.env.home.clone().or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|h| !h.is_empty())
+                .map(PathBuf::from)
+        })
+    }
 
     /// The root config file path.
     pub fn path(&self) -> &Path {
@@ -588,7 +618,7 @@ impl App {
     /// Records the backup of file `i` when the write made one.
     fn note_backup(&mut self, i: usize, existed: bool) {
         let backup = self.ws.backup_path_for(i);
-        if existed && backup.exists() {
+        if existed && !self.write.no_backup && backup.exists() {
             self.last_backup = Some(backup);
         }
     }
@@ -800,7 +830,7 @@ impl App {
             Ok(false) => {}
         }
         let mut ws = self.ws.clone();
-        let outcome = match op.apply(&mut ws, &self.env) {
+        let outcome = match op.apply(&mut ws, &self.env, self.write) {
             Ok(o) => o,
             Err(e) => {
                 self.fail(e.to_string());
@@ -809,7 +839,7 @@ impl App {
         };
         let existed: Vec<bool> = self.ws.files.iter().map(|f| f.existed).collect();
         let previous = std::mem::replace(&mut self.ws, ws);
-        let written = match self.ws.save(WriteOptions::default()) {
+        let written = match self.ws.save(self.write) {
             Ok(w) => w,
             Err(e) => {
                 self.ws = previous;
@@ -905,7 +935,7 @@ impl App {
         config.sort_sections();
         let text = config.render();
         let existed = self.ws.files[i].existed;
-        if let Err(e) = self.ws.save_text(i, &text, WriteOptions::default()) {
+        if let Err(e) = self.ws.save_text(i, &text, self.write) {
             self.editor_error = Some(e.to_string());
             return false;
         }

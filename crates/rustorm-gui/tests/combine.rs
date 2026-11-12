@@ -134,6 +134,22 @@ impl Home {
                 k.kept
             ));
         }
+        // The CLI prints this line to stderr as `warning: ...`; the UIs
+        // put it in the status line.
+        let moved = |p: &Path| {
+            outcome
+                .retired
+                .iter()
+                .any(|r| r.to.is_some() && r.from == p)
+        };
+        for w in outcome.report.includes.iter().filter(|w| !moved(&w.loads)) {
+            lines.push(format!(
+                "Warning: Include {} in {} still loads {}.",
+                w.pattern,
+                w.file.display(),
+                w.loads.display()
+            ));
+        }
         lines.push(outcome.report.summary(Some(&outcome.output)));
         lines.extend(outcome.retired.iter().map(|r| r.message()));
         lines.join(" ")
@@ -282,6 +298,12 @@ fn uicmb_3_gui_decisions_match_cli() {
         gui_said,
         said.replace(&cli.dir.path().display().to_string(), "HOME")
     );
+    assert!(
+        gui_said.contains(
+            "Warning: Include ~/.ssh/config.d/* in HOME/.ssh/config still loads HOME/.ssh/config.d/legacy. combined 2 files"
+        ),
+        "the include warning precedes the summary: {gui_said}"
+    );
     assert!(gui.read(".ssh/config").contains("old-vps.example.com"));
     assert!(gui.read(".ssh/config").contains("nas.local"));
     assert!(gui.path(".ssh/config~").exists());
@@ -400,6 +422,10 @@ fn uicmb_7_gui_retire_moves_inputs_as_cli_retire_and_table_refreshes() {
         said.replace(&cli.dir.path().display().to_string(), "HOME")
     );
     assert!(gui_said.contains("retired to HOME/.ssh/retired/cypress."));
+    assert!(
+        !gui_said.contains("Warning:"),
+        "a retired input gets no include warning: {gui_said}"
+    );
     // The table and Files list read the workspace again.
     let s = h.state();
     assert!(s.rows().iter().any(|r| r.name == "extra"));
@@ -472,4 +498,37 @@ fn gui_menu_opens_combine_and_cleanup() {
     click(&mut h, "Edit");
     click(&mut h, "Clean Up Duplicates…");
     assert!(h.state().cleanup().is_some());
+}
+
+/// `--no-backup` (`App::with_write_options`): Combine writes the base
+/// without `<file>~`, and the files match the CLI's `--no-backup` run.
+#[test]
+fn gui_no_backup_combine_writes_no_backup() {
+    let gui = Home::new();
+    let cli = Home::new();
+    let app = App::with_env(gui.path(".ssh/config"), gui.env())
+        .unwrap()
+        .with_write_options(WriteOptions { no_backup: true });
+    let mut h = Harness::builder()
+        .with_size([1500.0, 1000.0])
+        .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+    h.run();
+    open_legacy(&mut h);
+    click(&mut h, "Keep nas");
+    click(&mut h, "Replace vps");
+    click(&mut h, "Write");
+    assert!(h.state().combine().is_none());
+    assert!(!gui.path(".ssh/config~").exists());
+    assert_eq!(h.state().last_backup(), None);
+    let request = CombineRequest {
+        inputs: vec![cli.path(".ssh/config"), cli.path(".ssh/config.d/legacy")],
+        output: None,
+        policy: OnConflict::Fail,
+        decisions: host_decisions(&["nas".to_string()], &["vps".to_string()]).unwrap(),
+        retire: false,
+    };
+    request
+        .commit(None, WriteOptions { no_backup: true }, Some(cli.dir.path()))
+        .unwrap();
+    assert_eq!(gui.snapshot(), cli.snapshot());
 }
