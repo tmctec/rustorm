@@ -32,6 +32,7 @@ rustorm add-section lab                       # create an empty section
 rustorm combine ~/.ssh/config ~/.ssh/config.d/cypress   # merge a second file into your config
 rustorm search 'example\.com'                 # regex over names, aliases, keys and values
 rustorm check                                 # unknown keys, missing identity files, duplicates
+rustorm cleanup                               # find duplicate hosts and test which definition connects
 rustorm includes                              # the files your Include lines load, with host counts
 ```
 

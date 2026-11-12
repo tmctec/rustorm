@@ -41,6 +41,7 @@ rustorm add-section lab                       # create an empty section
 rustorm combine ~/.ssh/config ~/.ssh/config.d/cypress   # merge a second file into your config
 rustorm delete vps                            # remove a host
 rustorm check                                 # report unknown keys, missing files, duplicates
+rustorm cleanup                               # find duplicate hosts and test which definition works
 rustorm includes                              # the files your Include lines load
 ```
 
@@ -83,6 +84,16 @@ rustorm show --where tags=db,cache --filter hostname --just-value   # every db o
 
 ## Combining config files
 
+Three commands deal with hosts spread over several files. Pick by what you want to end up with:
+
+| You want to | Use |
+|---|---|
+| Fold one or more files into another, physically, so one file holds every host | `rustorm combine`, or Combine in the terminal UI (`M`) and the desktop app (**Combine…**) |
+| Keep the files, and settle each host that two of them define | `rustorm reconcile`, or Conflicts (`C`, **Conflicts…**) |
+| Find every kind of duplicate and see which definition actually connects | `rustorm cleanup`, or Cleanup (`X`, **Cleanup…**) |
+
+You never need to merge files just to see them together: when your config has an `Include` line, every command already treats the main config and the files it loads as one set (see Included files).
+
 `rustorm combine FILE FILE...` merges two or more ssh config files into the first one. Hosts from the later files are added to the first: a host under a section joins the section of the same name, creating it if needed; a host without a section joins the catch-all; `Host *` settings the first file lacks are added and the ones it already has are kept, with a line telling you which. Comments, `Include` and `Match` lines all survive.
 
 ```
@@ -91,9 +102,13 @@ rustorm combine a.conf b.conf -o merged.conf                   # write it somewh
 rustorm combine a.conf b.conf --stdout                         # print it, write nothing
 rustorm combine a.conf b.conf --on-conflict keep               # a name in both files: keep a.conf's
 rustorm combine a.conf b.conf --on-conflict replace            # ...or take b.conf's
+rustorm combine a.conf b.conf --keep nas --replace vps         # decide each conflicting host yourself
+rustorm combine ~/.ssh/config ~/.ssh/config.d/old --retire     # then move config.d/old out of the Include wildcard
 ```
 
-A host name that appears in two files is a conflict. Without `--on-conflict`, `combine` lists every conflict and writes nothing, so it never silently overwrites a host. The file that gets written is backed up first, like every other change. If your config has an `Include` line that still loads one of the files you merged, `combine` warns you so you can remove the line yourself.
+A host name that appears in two files is a conflict. Without `--on-conflict`, `combine` lists every conflict and writes nothing, so it never silently overwrites a host. `--keep HOST` and `--replace HOST` decide one conflict each and win over `--on-conflict`. The file that gets written is backed up first, like every other change. If your config has an `Include` line that still loads one of the files you merged, `combine` warns you; `--retire` instead moves each such file to `~/.ssh/retired/` after the write, so ssh stops loading it. A merged file no `Include` loads stays where it is.
+
+The terminal UI (`M`) and the desktop app (**Combine…**) walk through the same merge: pick the base file and the files to fold in, choose where the result goes, look at a preview of the merged file and its conflicts, decide keep or replace for each conflict, and write. Nothing is written until every conflict is decided, and cancelling leaves every file as it was.
 
 ## Included files
 
@@ -130,6 +145,27 @@ rustorm reconcile old --add printer --retire            # keep the host only `ol
 
 Naming a file (`old`) limits the work to the copies in it and also shows its **orphans**, hosts no other file defines: `--add` moves one into your main config, `--keep-live` leaves it out. Once every host in the file is decided, `--retire` moves the file to `~/.ssh/retired/`, out of the `Include` wildcard; nothing is ever deleted, and every file written is backed up first. The terminal UI (`C`) and the desktop app (**Conflicts…** in the sidebar) do the same with the two definitions shown side by side.
 
+### Finding duplicates and testing which one works
+
+`rustorm cleanup` (also `rustorm dedupe`) finds three kinds of duplicate:
+
+- **same name**: a host defined in two files. ssh reads the first; the later one is a copy.
+- **dead**: a host defined twice in the same file. ssh never reads the second block.
+- **same target**: two different names that reach the same `user@hostname:port`.
+
+It then tests each definition on its own, the copy that ssh never reads included, and reports `works`, `refused`, `dns failure`, `timeout`, `unreachable` or `auth failure` beside it, with a recommendation: take the copy when only the copy works, keep the live one and drop the copy when only the live one works, drop identical copies and dead blocks. When both work but differ, or both fail, it leaves the host for you (`rustorm reconcile` shows the two side by side).
+
+```
+rustorm cleanup                          # every duplicate, each definition tested with a TCP connect
+rustorm cleanup --auth                   # test with a real ssh login instead (no password prompts)
+rustorm cleanup --no-probe               # list the duplicates without touching the network
+rustorm cleanup old                      # only the copies in config.d/old
+rustorm cleanup --apply                  # apply every recommendation, with a backup
+rustorm cleanup --fold proof-twin        # make proof-twin an extra name of the host it duplicates
+```
+
+`cleanup` changes nothing unless you give `--apply` or `--fold`. The default test only opens a TCP connection to the host's port and sends nothing. A host reached through `ProxyJump` or `ProxyCommand` needs `--auth`, which runs `ssh -o BatchMode=yes <host> true` against that one definition. `--timeout SECS` bounds each test (5 seconds by default). `--fold` refuses when the two hosts' settings or notes differ. On a terminal, `cleanup` asks about each finding in turn. The terminal UI (`X`) and the desktop app (**Cleanup…**) list the same findings and run the tests in the background, so the results appear one by one.
+
 `rustorm check` also reports a host defined in two files (ssh uses the first), an `Include` that loads a file that looks like a backup (`.bak`, `.orig`, `~`), an `Include` placed inside `Host *` (rustorm treats it as global), and an included file it cannot read. Each file written is backed up beside it first. When a wildcard in an `Include` would match that backup, rustorm names it `.<file>~` instead (`~/.ssh/config.d/.cypress~`) so neither ssh nor rustorm ever loads a backup as a config.
 
 ## Terminal UI
@@ -149,6 +185,8 @@ Naming a file (`old`) limits the work to the copies in it and also shows its **o
 | `n` | Create an empty section |
 | `F` | Focus the file list (shown when the config includes other files); the editor shows the highlighted file, and `Enter` moves into it |
 | `C` | Open Conflicts (when the config includes other files): each host defined in two files, side by side; keep the live one, take the copy, or go key by key, drop identical copies, retire a backup |
+| `M` | Open Combine: pick a base file and the files to fold in, preview the result, `k` keep or `r` replace each conflict, `R` retire the merged files, `Enter` write |
+| `X` | Open Cleanup: every duplicate host; `p` tests each definition (`P` with an ssh login), `a` applies the highlighted recommendation, `A` all of them, `f` folds a same-target pair |
 | `o` | Open the editor at the selected host, in the file that holds it |
 | `Ctrl-S` / `Ctrl-R` | In the editor: save, or discard and reload |
 | `Esc` | Cancel a form or prompt, or leave the editor |
@@ -168,6 +206,7 @@ Every table column sorts and filters, including proxy (`ProxyCommand`) and jump 
 - A host's location, tags and notes also show under the Edit host heading, and the filter box above the table matches them.
 - Add opens the same form empty. Clone and Move to section act on the selected host.
 - New section… under the sidebar creates an empty section; on a file without sections it also creates the catch-all. With a section selected, Rename section… renames it, or merges it into a section that already has the new name.
+- **Combine…** (File > Combine Files…) merges two or more files: choose the base and the files to fold in, preview the result, pick Keep or Replace for each conflict, tick **Retire merged files** if you want them moved out of the `Include` wildcard, and click **Write**. **Cleanup…** (Edit > Clean Up Duplicates…) lists every duplicate host; **Probe** tests each definition in the background, then **Apply**, **Apply all** or **Fold** acts on the results. Both are disabled while the editor has unsaved text.
 - With included files the sidebar lists every file with its host count, the table gains a file column, and the editor has a file selector; Save writes only the selected file. Show in Editor on a host opens its file at its `Host` line. Quitting with several unsaved files lists them in one dialog with Save All.
 - Shortcuts: `Cmd-S` (or `Ctrl-S`) save, `Cmd-N` add, `Cmd-F` focus the filter, `Cmd-E` open the editor, `Cmd-1` / `Cmd-2` switch tabs, `Delete` remove the selected host, `Esc` cancel.
 
@@ -184,6 +223,7 @@ Both UIs include an editor for the raw config file with syntax highlighting: com
 | `~/.ssh/config` | The only place host data lives. Created with mode 0600 if missing. |
 | `~/.ssh/config~` | Backup written before every change. `--no-backup` skips it. |
 | Files named by `Include` lines | Read and written as part of the config; each is backed up beside itself before a change, as `.<file>~` when an `Include` wildcard would otherwise load the backup. |
+| `~/.ssh/retired/` | Files `reconcile --retire` and `combine --retire` move out of the `Include` wildcard. rustorm never deletes them. |
 | `~/.config/rustorm/config.toml` (Linux), `~/Library/Application Support/rustorm/config.toml` (macOS), `%AppData%\rustorm\config.toml` (Windows) | Optional command aliases and defaults for the CLI. |
 
 Errors go to standard error prefixed `error:`. Exit codes: 0 success, 1 the operation was refused (host missing, name taken, invalid input), 2 usage error, 3 the config file could not be read or written.
