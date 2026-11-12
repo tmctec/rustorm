@@ -42,8 +42,10 @@ pub mod userconfig;
 pub mod workspace;
 
 pub use combine::{
-    combine, CombineInput, CombineReport, Conflict, DefaultsAdded, DefaultsSkipped, IncludeWarning,
-    OnConflict,
+    combine, combine_with, host_decisions, load_inputs, CombineInput, CombineOutcome,
+    CombinePreview, CombineReport, CombineRequest, CombineRetired, Conflict, DefaultsAdded,
+    DefaultsSkipped, Fingerprint, HostDecision, HostDecisions, IncludeWarning, OnConflict,
+    PreviewConflict,
 };
 pub use error::{join_and, Error, Result};
 pub use include::{
