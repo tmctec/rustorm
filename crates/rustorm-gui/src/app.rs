@@ -1,6 +1,7 @@
 //! [`App`]: the whole rustorm window as an `eframe::App`.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use egui::{
     Button, Color32, FontId, Key, KeyboardShortcut, Modifiers, RichText, Sense, TextEdit, Ui,
@@ -8,12 +9,16 @@ use egui::{
 };
 use egui_extras::{Column as TableColumn, TableBuilder};
 use rustorm_core::{
-    complete_line, premade_value, swap_value, Config, Env, FileState, KeyGroup, SectionSummary,
-    SettingsDraft, Workspace, WorkspaceSection, WriteOptions,
+    complete_line, premade_value, swap_value, Config, Env, FileState, KeyGroup, Prober,
+    SectionSummary, SettingsDraft, Workspace, WorkspaceSection, WriteOptions,
 };
 
+mod cleanup;
+mod combine;
 mod conflicts;
 
+pub use cleanup::{recommendation_text, CleanupView};
+pub use combine::{CombineFile, CombineView};
 pub use conflicts::{ConflictsView, RetireView};
 
 use crate::highlight::highlight_job;
@@ -219,6 +224,18 @@ pub struct App {
     conflict_total: usize,
     /// The report's summary line, the button's hover text.
     conflict_summary: String,
+    /// The Combine dialog.
+    combine: Option<CombineView>,
+    /// The Cleanup dialog.
+    cleanup: Option<CleanupView>,
+    /// Findings in the cleanup report, for the sidebar button.
+    cleanup_total: usize,
+    /// The cleanup report's summary line, the button's hover text.
+    cleanup_summary: String,
+    /// The prober Cleanup uses in place of the TCP connect and ssh login.
+    prober: Option<Arc<dyn Prober>>,
+    /// The context of the last frame, for probe threads to repaint.
+    ctx: Option<egui::Context>,
     editor_error: Option<String>,
     status: String,
     last_backup: Option<PathBuf>,
@@ -266,6 +283,12 @@ impl App {
             conflicts: None,
             conflict_total: 0,
             conflict_summary: String::new(),
+            combine: None,
+            cleanup: None,
+            cleanup_total: 0,
+            cleanup_summary: String::new(),
+            prober: None,
+            ctx: None,
             editor_error: None,
             status: String::new(),
             last_backup: None,
@@ -483,6 +506,26 @@ impl App {
             self.filters.file = None;
         }
         self.rereport();
+        let cleanup = self.ws.cleanup_report(None, &self.env);
+        self.cleanup_total = cleanup.findings.len();
+        self.cleanup_summary = cleanup.summary();
+    }
+
+    /// Reads the workspace again after a write the core made outside it
+    /// (Combine), so the table, Files list and editor show the result.
+    fn reload_after_external_write(&mut self) {
+        match self.load_fresh() {
+            Ok(fresh) => {
+                self.adopt(fresh);
+                self.editor_error = None;
+                self.refresh();
+                match self.selected.clone() {
+                    Some(s) => self.select(&s),
+                    None => self.form = self.form.take().filter(|f| f.mode == FormMode::Add),
+                }
+            }
+            Err(e) => self.status = format!("error: {e}"),
+        }
     }
 
     /// Replaces the workspace with `fresh`, matching files by path: a
@@ -695,6 +738,11 @@ impl App {
             | Some(Dialog::Move { error, .. })
             | Some(Dialog::AddSection { error, .. })
             | Some(Dialog::RenameSection { error, .. }) => *error = Some(message.clone()),
+            _ if self.cleanup.is_some() => {
+                if let Some(view) = &mut self.cleanup {
+                    view.fail(message.clone());
+                }
+            }
             _ if self.conflicts.is_some() => {
                 if let Some(view) = &mut self.conflicts {
                     view.fail(message.clone());
@@ -793,7 +841,11 @@ impl App {
         match outcome.select {
             Some(name) => self.select(&name),
             None if matches!(op, Op::AddSection { .. } | Op::RenameSection { .. }) => {}
-            None if matches!(op, Op::Reconcile { .. } | Op::Retire { .. }) => {
+            None if matches!(
+                op,
+                Op::Reconcile { .. } | Op::Retire { .. } | Op::Cleanup { .. } | Op::Fold { .. }
+            ) =>
+            {
                 match self.selected.clone() {
                     Some(s) => self.select(&s),
                     None => self.form = self.form.take().filter(|f| f.mode == FormMode::Add),
@@ -906,6 +958,7 @@ impl App {
     /// Draws the whole window into `ui` and handles its input.
     pub fn show(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        self.ctx = Some(ctx.clone());
         self.handle_close(&ctx);
         self.handle_shortcuts(&ctx);
         let title = self.title();
@@ -932,6 +985,8 @@ impl App {
             }
         });
         self.conflicts_dialog(&ctx);
+        self.combine_dialog(&ctx);
+        self.cleanup_dialog(&ctx);
         self.dialogs(&ctx);
     }
 
@@ -963,7 +1018,11 @@ impl App {
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        if self.dialog.is_some() {
+        if self.dialog.is_some()
+            || self.conflicts.is_some()
+            || self.combine.is_some()
+            || self.cleanup.is_some()
+        {
             return;
         }
         if ctx.input_mut(|i| i.consume_shortcut(&SAVE)) {
@@ -1050,6 +1109,13 @@ impl App {
                     self.discard_editor();
                 }
                 ui.separator();
+                if ui
+                    .add_enabled(!self.editor_dirty(), Button::new("Combine Files…"))
+                    .clicked()
+                {
+                    self.open_combine();
+                }
+                ui.separator();
                 if ui.button("Quit").clicked() {
                     self.request_close();
                 }
@@ -1076,6 +1142,23 @@ impl App {
                 {
                     self.tab = Tab::Hosts;
                     self.focus_filter = true;
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(!self.editor_dirty(), Button::new("Clean Up Duplicates…"))
+                    .clicked()
+                {
+                    self.open_cleanup();
+                }
+                if self.is_multi()
+                    && ui
+                        .add_enabled(
+                            self.conflict_total > 0 && !self.editor_dirty(),
+                            Button::new("Conflicts…"),
+                        )
+                        .clicked()
+                {
+                    self.open_conflicts();
                 }
             });
             ui.menu_button("View", |ui| {
@@ -1254,6 +1337,32 @@ impl App {
             if resp.clicked() {
                 self.open_conflicts();
             }
+        }
+        ui.add_space(if multi { 4.0 } else { 10.0 });
+        let dirty = self.editor_dirty();
+        if ui
+            .add_enabled(!dirty, Button::new("Combine…"))
+            .on_hover_text("Merge two or more config files into one")
+            .on_disabled_hover_text("Save or discard the editor first")
+            .clicked()
+        {
+            self.open_combine();
+        }
+        let n = self.cleanup_total;
+        let label = if n > 0 {
+            format!("Cleanup…  {n}")
+        } else {
+            "Cleanup…".to_string()
+        };
+        if ui
+            .add_enabled(!dirty, Button::new(label))
+            .on_hover_text(&self.cleanup_summary)
+            .on_disabled_hover_text("Save or discard the editor first")
+            .clicked()
+        {
+            self.open_cleanup();
+        }
+        if multi {
             ui.add_space(10.0);
             ui.heading("Files");
             self.files_list(ui);

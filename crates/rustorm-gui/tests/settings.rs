@@ -733,3 +733,244 @@ fn fv_14_gui_premade_value_is_selected() {
     h.run();
     assert_eq!(value(&h, "Port", 0), "2222");
 }
+
+/// A TCP probe held until the walkthrough releases it, so a screenshot
+/// can catch one status landing while the others still run.
+struct HeldTcp {
+    released: std::sync::Mutex<Vec<String>>,
+    cv: std::sync::Condvar,
+}
+
+impl HeldTcp {
+    fn release(&self, file: &str) {
+        self.released.lock().unwrap().push(file.to_string());
+        self.cv.notify_all();
+    }
+}
+
+impl rustorm_core::Prober for HeldTcp {
+    fn probe(&self, t: &rustorm_core::ProbeTarget) -> rustorm_core::ProbeResult {
+        let file = t.file.file_name().unwrap().to_string_lossy().to_string();
+        let mut open = self.released.lock().unwrap();
+        while !open.iter().any(|f| f == &file || f == "*") {
+            open = self
+                .cv
+                .wait_timeout(open, std::time::Duration::from_millis(10))
+                .unwrap()
+                .0;
+        }
+        drop(open);
+        rustorm_core::TcpProber.probe(t)
+    }
+}
+
+/// Clicks through Combine… and Cleanup… on a fixture HOME, saving a
+/// screenshot of the combine preview, a probe status landing while the
+/// others run, and the applied result next to `RUSTORM_GUI_EVIDENCE`, plus
+/// a text log of what each step showed. Run with `--ignored`.
+#[test]
+#[ignore]
+fn gui_walkthrough_combine_and_cleanup() {
+    use std::fmt::Write as _;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let evidence =
+        PathBuf::from(std::env::var("RUSTORM_GUI_EVIDENCE").expect("RUSTORM_GUI_EVIDENCE"));
+    let dir = evidence.parent().unwrap().to_path_buf();
+    let stem = evidence.file_stem().unwrap().to_string_lossy().to_string();
+    let shot = |h: &mut Harness<'static, App>, name: &str| -> PathBuf {
+        let path = dir.join(format!("{stem}-{name}.png"));
+        h.render().expect("render").save(&path).expect("save png");
+        path
+    };
+    let click = |h: &mut Harness<'static, App>, label: &str| {
+        h.get_all_by_label(label)
+            .last()
+            .unwrap_or_else(|| panic!("no node labelled {label:?}"))
+            .click();
+        h.run();
+    };
+    let mut out = String::new();
+    let build = |home: &std::path::Path, prober: Option<Arc<HeldTcp>>| {
+        let env = rustorm_core::Env {
+            user: Some("me".to_string()),
+            home: Some(home.to_path_buf()),
+        };
+        let mut app = App::with_env(home.join(".ssh/config"), env).unwrap();
+        if let Some(p) = prober {
+            app.set_prober(p);
+        }
+        let mut h = Harness::builder()
+            .with_size([1400.0, 980.0])
+            .build_ui_state(|ui, app: &mut App| app.show(ui), app);
+        h.run();
+        h
+    };
+
+    // ----- Combine -----
+    let home = tempfile::tempdir().unwrap();
+    let w = |rel: &str, text: &str| {
+        let p = home.path().join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    };
+    w(".ssh/config", "Include ~/.ssh/config.d/*\n\nHost *\n    ServerAliveInterval 30\n\nHost nas\n    HostName nas.local\n\nHost vps\n    HostName vps.example.com\n    User admin\n");
+    w(".ssh/config.d/legacy", "Host *\n    ServerAliveInterval 60\n    Compression yes\n\nHost nas\n    HostName 192.168.1.10\n\nHost vps\n    HostName old-vps.example.com\n    User root\n\nHost printer\n    HostName 192.168.1.20\n");
+    let mut h = build(home.path(), None);
+    click(&mut h, "Combine…");
+    click(&mut h, "Merge ~/.ssh/config.d/legacy");
+    click(&mut h, "Keep nas");
+    click(&mut h, "Replace vps");
+    click(&mut h, "Retire merged files");
+    let p = h.state().combine().unwrap().preview().unwrap().clone();
+    writeln!(out, "--- Combine: base ~/.ssh/config, merge ~/.ssh/config.d/legacy, Keep nas, Replace vps, Retire").unwrap();
+    writeln!(out, "preview summary: {}", p.report.summary(None)).unwrap();
+    for c in &p.conflicts {
+        writeln!(out, "conflict {}: {:?}", c.name, c.decision).unwrap();
+    }
+    writeln!(
+        out,
+        "retirable: {:?}",
+        p.retirable
+            .iter()
+            .map(|r| r.file_name().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "screenshot: {}",
+        shot(&mut h, "combine-preview").display()
+    )
+    .unwrap();
+    click(&mut h, "Write");
+    writeln!(
+        out,
+        "Write: status {:?}",
+        h.state()
+            .status()
+            .replace(&home.path().display().to_string(), "/home/me")
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "--- ~/.ssh/config after\n{}",
+        std::fs::read_to_string(home.path().join(".ssh/config")).unwrap()
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "retired: {}",
+        home.path().join(".ssh/retired/legacy").exists()
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "screenshot: {}",
+        shot(&mut h, "combine-written").display()
+    )
+    .unwrap();
+
+    // ----- Cleanup -----
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let open_port = listener.local_addr().unwrap().port();
+    let closed_port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let home = tempfile::tempdir().unwrap();
+    let w = |rel: &str, text: &str| {
+        let p = home.path().join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    };
+    w(".ssh/config", &format!("Include ~/.ssh/config.d/*\n\nHost nas\n    HostName 127.0.0.1\n    Port {open_port}\n    User me\n\nHost web\n    HostName 127.0.0.1\n    Port {open_port}\n    User deploy\n\nHost web-prod\n    HostName 127.0.0.1\n    Port {open_port}\n    User deploy\n\nHost nas\n    HostName 127.0.0.1\n\nHost *\n    ServerAliveInterval 30\n"));
+    w(
+        ".ssh/config.d/vps",
+        &format!("Host vps\n    HostName 127.0.0.1\n    Port {closed_port}\n    User admin\n"),
+    );
+    w(
+        ".ssh/config.d/vps.bak",
+        &format!("Host vps\n    HostName 127.0.0.1\n    Port {open_port}\n    User me\n"),
+    );
+    let prober = Arc::new(HeldTcp {
+        released: std::sync::Mutex::new(Vec::new()),
+        cv: std::sync::Condvar::new(),
+    });
+    let mut h = build(home.path(), Some(Arc::clone(&prober)));
+    click(&mut h, "Cleanup…  3");
+    writeln!(
+        out,
+        "\n--- Cleanup: {}",
+        h.state().cleanup().unwrap().report().summary()
+    )
+    .unwrap();
+    click(&mut h, "Probe");
+    prober.release("vps.bak");
+    let until = Instant::now() + Duration::from_secs(10);
+    let copy_status = |a: &App| {
+        let v = a.cleanup().unwrap();
+        let f = &v.report().findings[0];
+        v.status_text(&f.definitions[1]).to_string()
+    };
+    let mut frames = 0;
+    while copy_status(h.state()) != "works" {
+        assert!(Instant::now() < until, "the copy's probe landed");
+        std::thread::sleep(Duration::from_millis(5));
+        h.step();
+        frames += 1;
+    }
+    h.step();
+    let v = h.state().cleanup().unwrap();
+    let f = &v.report().findings[0];
+    writeln!(
+        out,
+        "Probe: after {frames} frames the copy reads {:?} while live reads {:?}; progress {:?}",
+        v.status_text(&f.definitions[1]),
+        v.status_text(&f.definitions[0]),
+        v.progress()
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "screenshot: {}",
+        shot(&mut h, "cleanup-probing").display()
+    )
+    .unwrap();
+    prober.release("*");
+    while h.state().cleanup().unwrap().probing() {
+        assert!(Instant::now() < until, "every probe landed");
+        std::thread::sleep(Duration::from_millis(5));
+        h.step();
+    }
+    h.run();
+    writeln!(
+        out,
+        "probed report:\n{}",
+        h.state().cleanup().unwrap().report().text()
+    )
+    .unwrap();
+    let all = format!(
+        "Apply all ({})",
+        h.state().cleanup().unwrap().report().applicable().len()
+    );
+    click(&mut h, &all);
+    writeln!(out, "{all}: status {:?}", h.state().status()).unwrap();
+    writeln!(
+        out,
+        "--- ~/.ssh/config.d/vps after\n{}",
+        std::fs::read_to_string(home.path().join(".ssh/config.d/vps")).unwrap()
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "screenshot: {}",
+        shot(&mut h, "cleanup-applied").display()
+    )
+    .unwrap();
+    drop(listener);
+    let text_path = dir.join(format!("{stem}-combine-cleanup.txt"));
+    std::fs::write(&text_path, out).unwrap();
+}

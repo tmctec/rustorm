@@ -3,8 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use rustorm_core::{
-    remaining_message, AddSpec, CloneSpec, Decision, EditSpec, Env, HostSelector, PairKind,
-    SectionRename, SettingChange, Workspace, WriteOptions,
+    remaining_findings, remaining_message, AddSpec, CleanupReport, CloneSpec, Decision, EditSpec,
+    Env, Error, Finding, HostSelector, PairKind, SectionRename, SettingChange, Workspace,
+    WriteOptions,
 };
 
 /// One reconcile decision, naming its pair as the Conflicts dialog showed
@@ -108,6 +109,24 @@ pub enum Op {
         /// Names of the conflicts and orphans decided without a write.
         decided: Vec<String>,
     },
+    /// The Cleanup dialog's Apply and Apply all: recommendations of the
+    /// report the dialog showed, applied as `rustorm cleanup --apply`
+    /// does.
+    Cleanup {
+        /// The report as the dialog showed it, probe results included.
+        report: Box<CleanupReport>,
+        /// Indices into its findings.
+        findings: Vec<usize>,
+    },
+    /// The Cleanup dialog's Fold: each later name of a same-target
+    /// finding folds into the first, as `rustorm cleanup --fold` does.
+    Fold {
+        /// The finding as the dialog showed it; a block that changed since
+        /// is refused as stale.
+        finding: Box<Finding>,
+        /// The names to fold, in order.
+        hosts: Vec<String>,
+    },
 }
 
 /// The index of the loaded file at absolute path `path`.
@@ -160,7 +179,9 @@ impl Op {
             Op::AddSection { .. }
             | Op::RenameSection { .. }
             | Op::Reconcile { .. }
-            | Op::Retire { .. } => Vec::new(),
+            | Op::Retire { .. }
+            | Op::Cleanup { .. }
+            | Op::Fold { .. } => Vec::new(),
         }
     }
 
@@ -379,6 +400,40 @@ impl Op {
                 let change = ws.retire(i, decided, WriteOptions::default())?;
                 Ok(Outcome {
                     message: change.messages.join(" "),
+                    select: None,
+                })
+            }
+            Op::Cleanup { report, findings } => {
+                let change = ws.apply_cleanup(report, findings)?;
+                let mut messages = change.messages;
+                messages.push(remaining_findings(
+                    ws.cleanup_report(None, env).findings.len(),
+                ));
+                Ok(Outcome {
+                    message: messages.join(" "),
+                    select: None,
+                })
+            }
+            Op::Fold { finding, hosts } => {
+                let current = finding.definitions.iter().all(|d| {
+                    ws.files.get(d.block.index).is_some_and(|f| {
+                        f.config.host_locations().contains(&d.block.loc)
+                            && f.config.host(d.block.loc).text() == d.block.text
+                    })
+                });
+                if !current {
+                    return Err(Error::CleanupStale(finding.names.join(", ")));
+                }
+                let mut messages = Vec::new();
+                for host in hosts {
+                    let fresh = ws.cleanup_report(None, env);
+                    messages.extend(ws.fold_host(&fresh, host)?.messages);
+                }
+                messages.push(remaining_findings(
+                    ws.cleanup_report(None, env).findings.len(),
+                ));
+                Ok(Outcome {
+                    message: messages.join(" "),
                     select: None,
                 })
             }
