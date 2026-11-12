@@ -1412,7 +1412,7 @@ Finds every duplicate host in the workspace, probes each definition to show whic
 |---|---|
 | same name | A host defined in two workspace files: the **live** definition, the one ssh reads first (D29), and a **copy**, paired as `reconcile` pairs them. |
 | dead | A name defined twice in one file: the **first** block and a later, **dead** one. ssh takes each key from the first block that sets it, so the dead block's values for those keys are never read. |
-| same target | Different names that reach the same `user@hostname:port`, each resolved through `Host *` the way ssh resolves it. `HostName` defaults to the name, `User` to `$USER`, `Port` to 22. |
+| same target | Different names that reach the same `user@hostname:port` through the same `ProxyJump` or `ProxyCommand`, if any, each resolved through `Host *` the way ssh resolves it. `HostName` defaults to the name, `User` to `$USER`, `Port` to 22. |
 
 With `FILE...` only the copies, dead blocks and same-target names in those files are in scope. `FILE` is a loaded file's name or a path, as for `--file`. Glob patterns and `Host *` never make a finding.
 

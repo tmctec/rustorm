@@ -160,6 +160,10 @@ pub enum Decision {
     Add,
     /// Remove an identical copy's block from the copy's file.
     DropIdentical,
+    /// Remove the copy's block from the copy's file and keep the live
+    /// definition, on a conflict or an identical pair (`cleanup`, when only
+    /// the live definition works or after taking the copy).
+    DropCopy,
     /// Undecided.
     Skip,
 }
@@ -179,6 +183,8 @@ pub struct Applied {
     pub left_out: Vec<String>,
     /// Identical copies dropped.
     pub dropped: Vec<String>,
+    /// Copies dropped by [`Decision::DropCopy`].
+    pub discarded: Vec<String>,
     /// The names of every conflict and orphan given a decision other than
     /// [`Decision::Skip`]; [`Workspace::retire`] takes them.
     pub decided: Vec<String>,
@@ -438,7 +444,7 @@ impl Workspace {
     /// counts matched files in load order. A host on line `l` of a file
     /// ranks at `path + [(l, MAX)]`, so it sorts before an `Include` below
     /// it and after one above it (D29). Files no `Include` loaded rank last.
-    fn read_paths(&self) -> Vec<Vec<(usize, usize)>> {
+    pub(crate) fn read_paths(&self) -> Vec<Vec<(usize, usize)>> {
         fn walk(
             ws: &Workspace,
             matches: &[IncludeMatch],
@@ -491,7 +497,7 @@ impl Workspace {
         out
     }
 
-    fn block_ref(&self, at: WorkspaceLocation) -> BlockRef {
+    pub(crate) fn block_ref(&self, at: WorkspaceLocation) -> BlockRef {
         let config = &self.files[at.file].config;
         BlockRef {
             index: at.file,
@@ -680,7 +686,7 @@ impl Workspace {
         }
     }
 
-    fn is_current(&self, side: &BlockRef) -> bool {
+    pub(crate) fn is_current(&self, side: &BlockRef) -> bool {
         let config = &self.files[side.index].config;
         config.host_locations().contains(&side.loc) && config.host(side.loc).text() == side.text
     }
@@ -767,6 +773,15 @@ impl Workspace {
                     if !drop_files.contains(&pair.copy.index) {
                         drop_files.push(pair.copy.index);
                     }
+                }
+                (PairKind::Conflict | PairKind::Identical, Decision::DropCopy) => {
+                    let live = pair.live.as_ref().expect("live side");
+                    removals.push((pair.copy.location(), None));
+                    applied.discarded.push(pair.name.clone());
+                    messages.push(format!(
+                        "{}: dropped the copy from {copy_label}; kept {}.",
+                        pair.name, live.label
+                    ));
                 }
                 (PairKind::Identical, _) => {}
                 (PairKind::Conflict, Decision::KeepLive) => {
