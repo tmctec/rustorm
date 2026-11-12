@@ -52,6 +52,8 @@ The focused pane has a double border and a bracketed title; the selected row is 
 | `Tab` / `Shift-Tab` | table, sections, editor | Cycle focus: files (on a workspace of several files), sections, table, editor. |
 | `F` | table, sections | Focus the file list; only on a workspace of several files (see Files). |
 | `C` | table | Open the Conflicts view: hosts defined in two files, decided one by one; only on a workspace of several files (see Files, Conflicts). |
+| `M` | table | Open the Combine view: merge two or more files into one, each conflict decided before the write (see Combine). |
+| `X` | table | Open the Cleanup view: every duplicate host, probed and applied (see Cleanup). |
 | `↑` `↓` / `j` `k`, `g` `G` / `Home` `End` | files | Move the highlight; the editor shows the highlighted file. |
 | `Enter` | files | Show that file in the editor and focus it. |
 | `Esc` | files | Return focus to the table. |
@@ -87,6 +89,10 @@ The focused pane has a double border and a bracketed title; the selected row is 
 | `Ctrl-T` | settings form | Switch between the filled view and every keyword. |
 | `Tab` | settings form, Add setting | Add the suggested keyword and move to its value. |
 | `y` / `n` | yes/no prompt | Answer; every key but `y` means no. |
+| `Space`, `b`, `t`, `o`, `Enter` | Combine files | Pick or unpick the file, make it the base, type a path to add, type the output, preview. |
+| `k` / `r`, `R`, `PgUp` `PgDn`, `Enter` | Combine preview | Keep the earlier block or replace it with the later one, retire on or off, scroll the merged text, write. |
+| `p` / `P`, `a`, `A`, `f` | Cleanup | Probe by TCP connect or by ssh login, apply the highlighted recommendation, apply every one but folds, fold. |
+| `Esc` | Combine, Cleanup | Back one step; from the Combine files or the Cleanup list, close. Nothing is written. |
 
 `q`, digits and letters type text while a form, the settings form, a filter input or the editor has focus.
 
@@ -205,4 +211,61 @@ On a workspace of several files (see `cli.md`, Included files) the TUI shows eve
 - **Save.** `Ctrl-S` saves only the file on screen, after its own backup (`<file>~`, or `<dir>/.<name>~` when an `Include` pattern would match `<file>~`; see `cli.md`, Included files), and reports `✔ Saved ~/.ssh/config.d/cypress.` The other buffers keep their edits.
 - **Forms.** Add, edit, settings, clone, move and delete write to the file the CLI would pick (see `cli.md`, Included files): a host edit to the file holding the host, a section to the file holding it, a new host without a section to the root. The status message names the file, as the CLI does. A section name held by two files refuses the form with `Error: section lab exists in ~/.ssh/config.d/cypress and ~/.ssh/config.d/gke. Edit the file you mean in the editor (F).` The forms refuse to run while any buffer has unsaved edits.
 - **Quit.** `q` or `Ctrl-C` with unsaved edits in several files asks once, listing them: `Unsaved changes in ~/.ssh/config.d/cypress, ~/.ssh/config.d/ranch. [s]ave all / [d]iscard all / [c]ancel`. `s` saves every listed file and quits, unless a save is refused, which leaves the TUI open on that file. With one dirty file the prompt is the single-file one.
+- **Combine and Cleanup.** `M` and `X` work on a workspace of one file or several. The Combine file list holds every loaded file in load order; Cleanup finds same-name pairs only across files, and dead blocks and same-target names within any file. On a workspace of several files the `?` overlay lists `M` and `X` beside `C`.
 - **Conflicts.** `C` in the table opens the Conflicts view over the panes (see `cli.md`, reconcile): one row per host defined in two files, its live file (the one ssh reads first), its copy file and its kind — `conflict`, `conflict, labels only` (only a note, location, tag or other label differs), `identical`, or `orphan` — conflicts first. `↑` `↓`, `g` `G` and `Home` `End` move; `Enter` shows the pair side by side, live left and copy right, the lines that differ in bold, then `differs in: HostName: 10.0.0.1 | 10.0.0.9`. `l` keeps the live definition (on an orphan, leaves it out), `c` takes the copy into the live file, `k` goes key by key (`l` or `c` per differing key, `Backspace` undoes a pick, the last pick writes), `a` adds an orphan to the root, `s` skips to the next row. `D` drops every identical copy in the highlighted row's copy file. `R` retires that copy file to `~/.ssh/retired/` after `[y/N]`; while a host in it is undecided it is refused at once, naming them. Every decision writes through the same engine as `rustorm reconcile`, with a backup, and the list and table refresh; a pair whose file changed on disk since the list was read is refused and the list is read again. `Esc` goes back from the pair or key view to the list, and from the list to the table. A kept-live row reads `kept live` until the copy file is retired.
+
+## Combine
+
+`M` in the table opens the Combine view over the panes (see `cli.md`, combine). It merges two or more files into one through the same core call as `rustorm combine`, so the file written and its backup are byte for byte what the CLI writes with the same `--keep`, `--replace`, `-o` and `--retire`. The view refuses to open, and to write, while any editor buffer has unsaved edits: `Error: Save or discard the editor's changes first.`
+
+**Files.** The first step lists every loaded file in load order with its role: `base`, `input 1`, `input 2`, ... or blank. The root starts as the base.
+
+```
+  role      file
+  base      ~/.ssh/config
+            ~/.ssh/config.d/cypress
+  input 1   ~/.ssh/config.d/legacy
+
+  output    ~/.ssh/config (the base)
+```
+
+`↑` `↓`, `g` `G` and `Home` `End` move. `Space` picks the highlighted file as the next input, or unpicks it; `b` makes it the base. `t` opens `Add file:` for a path outside the workspace (`~/` is the home); `Enter` adds and picks it, and a path that is not a file reads `Error: ~/old/none is not a file. Type the path of a config file.` `o` opens `Output (empty: the base):`; an empty output writes the base. `Enter` previews; with fewer than two files picked: `Error: Pick a base and at least one more file. Space picks the highlighted file.`
+
+**Preview.** The second step reads the files and shows the merge without writing anything. Its title reads `Combine  preview into ~/.ssh/config  2 conflicts, 1 undecided`. The top lists each `Host *` key added or skipped (`Host *: Compression yes added from ~/.ssh/config.d/legacy.`, `Host *: ServerAliveInterval 60 from ~/.ssh/config.d/legacy skipped, keeping 30.`), each `Include` that still loads an input (`Warning: Include ~/.ssh/config.d/* in ~/.ssh/config still loads ~/.ssh/config.d/legacy.`), `retire: off` or `retire: on; moves ~/.ssh/config.d/legacy`, then one row per conflict: its name, its decision (`keep`, `replace` or `undecided`, the last in the error style), and the earlier and later file. Under them the highlighted conflict's two blocks stand side by side, earlier left and later right, the lines the other lacks in bold and the side to be written marked `✔ written`. The merged text fills the rest, scrolled with `PgUp` `PgDn`.
+
+`↑` `↓`, `g` `G` and `Home` `End` move between conflicts. `k` keeps the earlier block (`--keep`), `r` puts the later block in its place (`--replace`); each decision previews again, so the merged text shows it. `R` turns retiring on or off (`--retire`): `Retire on: ~/.ssh/config.d/legacy moves to ~/.ssh/retired/ after the write.`, or `Retire on: no Include loads a later input, so none moves.`
+
+**Write.** `Enter` writes once every conflict is decided; until then it is refused with `Error: 1 conflict is left undecided; nothing written. Press k to keep or r to replace each one.` An input that changed on disk since the preview is refused, `Error: /home/me/.ssh/config.d/legacy changed since the preview; the preview is read again. Check it, then press Enter.`, and the preview shows the new text. On success the view closes, the workspace is read again (a retired file leaves the file list), and the status line carries the CLI's lines: `✔ Host *: Compression yes added from /home/me/.ssh/config.d/legacy. combined 2 files into /home/me/.ssh/config: 4 hosts, 2 sections, 2 conflicts. /home/me/.ssh/config.d/legacy retired to /home/me/.ssh/retired/legacy.`
+
+**Cancel.** `Esc` in the preview returns to the files with the decisions kept; `Esc` in the files closes the view: `Combine cancelled; nothing written.` No file and no backup is written before `Enter` in the preview.
+
+## Cleanup
+
+`X` in the table opens the Cleanup view over the panes (see `cli.md`, cleanup). It lists every finding exactly as `rustorm cleanup --no-probe` prints it, the highlighted finding marked `>` and bold, and the summary last; the title reads `Cleanup  3 findings in 6 hosts.` The view refuses to open, and to write, while any editor buffer has unsaved edits.
+
+```
+> same name: vps
+    live  ~/.ssh/config.d/vps:1      admin@vps.example.com:22   not probed
+    copy  ~/.ssh/config.d/vps.bak:1  travis@vps.example.com:22  not probed
+    recommendation: probe to decide.
+
+  dead: nas
+    first  ~/.ssh/config:3   me@192.168.1.10:22  not probed
+    dead   ~/.ssh/config:15  me@192.168.1.10:22  not probed
+    recommendation: drop the dead block at ~/.ssh/config:15.
+```
+
+`↑` `↓` / `j` `k`, `g` `G` and `Home` `End` move between findings.
+
+**Probing.** `p` probes every definition alone with a TCP connect, as `rustorm cleanup` does; `P` probes with a `BatchMode` ssh login, as `--auth` does (`$RUSTORM_SSH` names the ssh program). Each probe is bounded by 5 seconds. Probes run on a background thread, so the view keeps taking keys; the title counts `probing 2/6`, each status replaces `not probed` as its probe lands (`works` in the success style, a failure in the error style, the text always there), and the recommendations follow. When the last lands the status reads `Probed 6 definitions.`
+
+**Apply.** `a` applies the highlighted finding's recommendation; `A` applies every recommendation but folds in one write, as `--apply` does; `f` folds every later name of a highlighted same-target finding into its first name, as `--fold` does. Each write reads changed files again first, goes through the same core calls as `rustorm cleanup`, after a backup, and reads the findings again; a probe result carries over to a definition that did not change. The status line carries the CLI's messages: `✔ vps: moved the copy from ~/.ssh/config.d/vps.bak into ~/.ssh/config.d/vps; only the copy works. nas: dropped the dead block at ~/.ssh/config:15. 1 finding remains.`
+
+Refusals: while probes run, `Error: Probes are running. Wait for them, or press Esc to abandon them.`; on a finding without a recommendation, its reason with the TUI remedy, such as `Error: vps: nothing to apply; probe to decide; press p.` or `decide in the Conflicts view (C)`; `a` on a same-target finding says to press `f`; `f` elsewhere reads `Error: f folds a same-target finding; nas is dead.`; a fold whose settings differ is refused with the core's reason. A block that changed on disk since the report is refused, `Error: vps changed since the report; the findings are read again.`, and nothing is written.
+
+**No duplicates.** The view reads `no duplicates in 3 hosts.`, the help bar offers only `?` and `Esc`, and `a`, `A` and `f` answer `Nothing to apply; no duplicates in 3 hosts.`
+
+**Close.** `Esc` closes the view. While probes run it abandons them, `Probes abandoned; nothing written.`: no further probe starts, the running ones end within their bound, and their results are dropped.
+
+**Injected probes.** `App::set_prober` replaces the `p` probe and `App::set_auth_prober` the `P` probe, and `App::set_probe_timeout` sets the bound, so tests and `rustorm-parity` drive Cleanup with a deterministic prober. `App::tick` takes the results that landed into the view; the binary calls it between key events.
+

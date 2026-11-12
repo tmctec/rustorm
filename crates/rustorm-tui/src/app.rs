@@ -1,7 +1,8 @@
 //! The TUI state machine and its rendering (docs/tui.md).
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -17,7 +18,13 @@ use rustorm_core::{
     Error, FileState, HostSelector, KeyPick, PairKind, Pick, ProblemKind, SectionRename,
     SettingChange, Workspace, WriteOptions,
 };
+use rustorm_core::{
+    remaining_findings, Action, FindingKind, HostDecision, Prober, SshProber, TcpProber,
+    DEFAULT_TIMEOUT,
+};
 
+use crate::cleanup::{Cleanup, ProbeRun};
+use crate::combine::{expand, Combine, Entry, Step};
 use crate::conflicts::{marked_lines, Conflicts, Item, View};
 use crate::editor::Editor;
 use crate::hosts::{self, Column, Filters, Row, Sort};
@@ -187,6 +194,17 @@ enum Mode {
     },
     /// Hosts defined in two or more files (`C`).
     Conflicts(Box<Conflicts>),
+    /// Two or more files merged into one (`M`).
+    Combine(Box<Combine>),
+    /// Every duplicate host, probed and applied (`X`).
+    Cleanup(Box<Cleanup>),
+}
+
+/// The refusal while a buffer holds unsaved text.
+const DIRTY: &str = "Save or discard the editor's changes first.";
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 type Stamp = Option<(SystemTime, u64)>;
@@ -416,7 +434,8 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 /// The key overlay's rows; on a workspace of several files the digit keys
-/// reach 8 and the file list keys join.
+/// reach 8 and the file list, Combine, Cleanup and Conflicts keys join. A
+/// single file keeps the overlay it had before workspaces (inc-tui-4).
 fn help_rows(multi: bool) -> Vec<(&'static str, &'static str, &'static str)> {
     if !multi {
         return HELP.to_vec();
@@ -433,6 +452,7 @@ fn help_rows(multi: bool) -> Vec<(&'static str, &'static str, &'static str)> {
             rows.push(("Enter", "files", "show file in editor"));
         }
         if k == "o" {
+            rows.push(("M / X", "table", "combine files / clean up duplicates"));
             rows.extend_from_slice(CONFLICT_HELP);
         }
     }
@@ -482,6 +502,41 @@ const CONFLICT_HELP: &[(&str, &str, &str)] = &[
     ("R", "conflicts", "retire the copy file"),
 ];
 
+/// The Combine view's keys.
+const COMBINE_HELP: &[(&str, &str, &str)] = &[
+    ("Up Down / g G", "combine", "move"),
+    ("Space", "combine files", "pick or unpick the file"),
+    ("b", "combine files", "make the file the base"),
+    ("t", "combine files", "type a path to add"),
+    ("o", "combine files", "type the output; empty: the base"),
+    ("Enter", "combine files", "preview the merge"),
+    (
+        "k / r",
+        "combine preview",
+        "keep earlier / replace with later",
+    ),
+    ("R", "combine preview", "retire merged inputs on / off"),
+    ("PgUp PgDn", "combine preview", "scroll the merged text"),
+    (
+        "Enter",
+        "combine preview",
+        "write, once every conflict is decided",
+    ),
+    ("Esc", "combine", "back; from the files, close"),
+];
+
+/// The Cleanup view's keys.
+const CLEANUP_HELP: &[(&str, &str, &str)] = &[
+    ("Up Down / j k", "cleanup", "move"),
+    ("g G / Home End", "cleanup", "first / last finding"),
+    ("p", "cleanup", "probe each definition (TCP connect)"),
+    ("P", "cleanup", "probe with a BatchMode ssh login"),
+    ("a", "cleanup", "apply the finding's recommendation"),
+    ("A", "cleanup", "apply every recommendation but folds"),
+    ("f", "cleanup", "fold a same-target finding"),
+    ("Esc", "cleanup", "close; abandons running probes"),
+];
+
 /// The whole TUI: model, view state and the mode it is in.
 pub struct App {
     ws: Workspace,
@@ -508,6 +563,14 @@ pub struct App {
     detached: bool,
     msg: Option<Msg>,
     quit: bool,
+    /// The Cleanup view's `p` probe.
+    prober: Arc<dyn Prober>,
+    /// The Cleanup view's `P` probe, a `BatchMode` ssh login.
+    auth_prober: Arc<dyn Prober>,
+    /// The bound on each probe.
+    probe_timeout: Duration,
+    /// Probes running for the Cleanup view.
+    probe: Option<ProbeRun>,
 }
 
 impl App {
@@ -541,9 +604,92 @@ impl App {
             detached: false,
             msg: None,
             quit: false,
+            prober: Arc::new(TcpProber),
+            auth_prober: Arc::new(SshProber::from_env()),
+            probe_timeout: DEFAULT_TIMEOUT,
+            probe: None,
         };
         app.refresh(None);
         Ok(app)
+    }
+
+    /// Replaces the Cleanup view's `p` probe (a TCP connect by default),
+    /// so tests and the parity crate probe deterministically.
+    pub fn set_prober(&mut self, prober: Arc<dyn Prober>) {
+        self.prober = prober;
+    }
+
+    /// Replaces the Cleanup view's `P` probe (`ssh -o BatchMode=yes` by
+    /// default, `$RUSTORM_SSH` naming the program).
+    pub fn set_auth_prober(&mut self, prober: Arc<dyn Prober>) {
+        self.auth_prober = prober;
+    }
+
+    /// Sets the bound on each probe (`--timeout`); 5 seconds by default.
+    pub fn set_probe_timeout(&mut self, timeout: Duration) {
+        self.probe_timeout = timeout;
+    }
+
+    /// Takes the probe results that landed since the last call into the
+    /// Cleanup view. True when the screen changed and needs a redraw. The
+    /// event loop calls it between key events.
+    pub fn tick(&mut self) -> bool {
+        let Some(run) = self.probe.as_mut() else {
+            return false;
+        };
+        let (results, finished) = run.drain();
+        let total = run.total;
+        if let Mode::Cleanup(c) = &mut self.mode {
+            for (t, r) in &results {
+                c.record(t, r);
+            }
+        }
+        if finished {
+            self.probe = None;
+            self.msg = Some(Msg::Info(format!(
+                "Probed {}.",
+                plural(total, "definition", "definitions")
+            )));
+        }
+        !results.is_empty() || finished
+    }
+
+    /// True while Cleanup probes run.
+    pub fn is_probing(&self) -> bool {
+        self.probe.is_some()
+    }
+
+    /// The open view over the panes: `combine files`, `combine preview`,
+    /// `cleanup`, `conflicts`, or `None`.
+    pub fn view_name(&self) -> Option<&'static str> {
+        match &self.mode {
+            Mode::Combine(c) if c.step == Step::Files => Some("combine files"),
+            Mode::Combine(_) => Some("combine preview"),
+            Mode::Cleanup(_) => Some("cleanup"),
+            Mode::Conflicts(_) => Some("conflicts"),
+            _ => None,
+        }
+    }
+
+    /// While the Combine preview shows, the highlighted conflict's name.
+    pub fn combine_conflict(&self) -> Option<String> {
+        match &self.mode {
+            Mode::Combine(c) => c
+                .preview
+                .as_ref()
+                .and_then(|p| p.conflicts.get(c.conflict_sel))
+                .map(|k| k.name.clone()),
+            _ => None,
+        }
+    }
+
+    /// While the Cleanup view is open, the highlighted finding's first
+    /// line (`same name: vps`).
+    pub fn cleanup_selected(&self) -> Option<String> {
+        match &self.mode {
+            Mode::Cleanup(c) => c.report.findings.get(c.sel).map(|f| f.heading()),
+            _ => None,
+        }
     }
 
     // ----- queries for the binary and tests -----
@@ -1312,6 +1458,8 @@ impl App {
             Mode::Settings(form) => self.handle_settings(form, key),
             Mode::Prompt(p) => self.handle_prompt(p, key),
             Mode::Conflicts(c) => self.handle_conflicts(*c, key),
+            Mode::Combine(c) => self.handle_combine(*c, key),
+            Mode::Cleanup(c) => self.handle_cleanup(*c, key),
             Mode::PickFilterColumn => {
                 if let KeyCode::Char(c) = key.code {
                     match Column::from_digit_in(c, self.ws.is_multi()) {
@@ -1687,6 +1835,496 @@ impl App {
         self.reconcile_apply(c, ri, vec![(ii, Decision::Keys(picks))]);
     }
 
+    // ----- combine -----
+
+    fn open_combine(&mut self) {
+        if !self.dirty().is_empty() {
+            self.error(DIRTY);
+            return;
+        }
+        self.mode = Mode::Combine(Box::new(Combine::new(&self.ws)));
+    }
+
+    /// Reads the preview of `c`'s choices; a decision that no longer
+    /// names a conflict is dropped. False, with the error shown, when the
+    /// files cannot be merged.
+    fn combine_preview(&mut self, c: &mut Combine) -> bool {
+        let home = home_dir(&self.opts.env);
+        let mut result = c.request().preview(home.as_deref());
+        if result.is_err() && !c.decisions.is_empty() {
+            let mut bare = c.request();
+            bare.decisions.clear();
+            if let Ok(p) = bare.preview(home.as_deref()) {
+                c.decisions
+                    .retain(|n, _| p.conflicts.iter().any(|k| &k.name == n));
+                result = c.request().preview(home.as_deref());
+            }
+        }
+        match result {
+            Ok(p) => {
+                c.conflict_sel = c.conflict_sel.min(p.conflicts.len().saturating_sub(1));
+                c.preview = Some(p);
+                true
+            }
+            Err(e) => {
+                self.error(tui_error(&e));
+                false
+            }
+        }
+    }
+
+    /// Writes the previewed merge through the core, as `rustorm combine`
+    /// does. True when written; the view then closes.
+    fn combine_write(&mut self, c: &mut Combine) -> bool {
+        if !self.dirty().is_empty() {
+            self.error(DIRTY);
+            return false;
+        }
+        let Some(preview) = c.preview.clone() else {
+            return false;
+        };
+        let undecided = preview.undecided().len();
+        if undecided > 0 {
+            self.error(format!(
+                "{} left undecided; nothing written. Press k to keep or r to replace each one.",
+                if undecided == 1 {
+                    "1 conflict is".to_string()
+                } else {
+                    format!("{undecided} conflicts are")
+                }
+            ));
+            return false;
+        }
+        let home = home_dir(&self.opts.env);
+        let out = match c.request().commit(
+            Some(&preview.fingerprints),
+            self.options(),
+            home.as_deref(),
+        ) {
+            Ok(out) => out,
+            Err(Error::CombineStale(path)) => {
+                if self.combine_preview(c) {
+                    self.error(format!(
+                        "{path} changed since the preview; the preview is read again. Check it, then press Enter."
+                    ));
+                }
+                return false;
+            }
+            Err(e) => {
+                self.error(tui_error(&e));
+                return false;
+            }
+        };
+        let mut parts = Vec::new();
+        for a in &out.report.added {
+            parts.push(format!(
+                "Host *: {} {} added from {}.",
+                a.key,
+                a.value,
+                a.from.display()
+            ));
+        }
+        for k in &out.report.skipped {
+            parts.push(format!(
+                "Host *: {} {} from {} skipped, keeping {}.",
+                k.key,
+                k.value,
+                k.from.display(),
+                k.kept
+            ));
+        }
+        let moved = |p: &Path| out.retired.iter().any(|r| r.to.is_some() && r.from == p);
+        for w in out.report.includes.iter().filter(|w| !moved(&w.loads)) {
+            parts.push(format!(
+                "Warning: Include {} in {} still loads {}.",
+                w.pattern,
+                w.file.display(),
+                w.loads.display()
+            ));
+        }
+        parts.push(out.report.summary(Some(&out.output)));
+        parts.extend(out.retired.iter().map(|r| r.message()));
+        match Workspace::load_with_home(
+            self.ws.files[0].path.clone(),
+            self.ws.home.clone().as_deref(),
+        ) {
+            Ok(fresh) => self.replace_workspace(fresh),
+            Err(e) => parts.push(format!("Warning: {}", tui_error(&e))),
+        }
+        self.show_selected_host();
+        self.msg = Some(Msg::Success(parts.join(" ")));
+        true
+    }
+
+    fn handle_combine(&mut self, mut c: Combine, key: KeyEvent) {
+        self.msg = None;
+        if c.help {
+            if matches!(
+                key.code,
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
+            ) {
+                c.help = false;
+            }
+            self.mode = Mode::Combine(Box::new(c));
+            return;
+        }
+        if let Some(entry) = c.entry.take() {
+            self.combine_entry(&mut c, entry, key);
+            self.mode = Mode::Combine(Box::new(c));
+            return;
+        }
+        match c.step {
+            Step::Files => {
+                let last = c.candidates.len().saturating_sub(1);
+                match key.code {
+                    KeyCode::Esc => {
+                        self.msg = Some(Msg::Info("Combine cancelled; nothing written.".into()));
+                        return;
+                    }
+                    KeyCode::Char('?') => c.help = true,
+                    KeyCode::Down => c.sel = (c.sel + 1).min(last),
+                    KeyCode::Up => c.sel = c.sel.saturating_sub(1),
+                    KeyCode::Home | KeyCode::Char('g') => c.sel = 0,
+                    KeyCode::End | KeyCode::Char('G') => c.sel = last,
+                    KeyCode::Char(' ') => c.toggle(),
+                    KeyCode::Char('b') => c.make_base(),
+                    KeyCode::Char('t') => c.entry = Some(Entry::AddPath(String::new())),
+                    KeyCode::Char('o') => {
+                        let now = c
+                            .output
+                            .as_ref()
+                            .map_or(String::new(), |p| self.ws.display_path(p));
+                        c.entry = Some(Entry::Output(now));
+                    }
+                    KeyCode::Enter => {
+                        if c.chosen.len() < 2 {
+                            self.error(
+                                "Pick a base and at least one more file. Space picks the highlighted file.",
+                            );
+                        } else if self.combine_preview(&mut c) {
+                            c.step = Step::Preview;
+                            c.scroll = 0;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Step::Preview => {
+                let n = c.preview.as_ref().map_or(0, |p| p.conflicts.len());
+                let last = n.saturating_sub(1);
+                match key.code {
+                    KeyCode::Esc => c.step = Step::Files,
+                    KeyCode::Char('?') => c.help = true,
+                    KeyCode::Down => c.conflict_sel = (c.conflict_sel + 1).min(last),
+                    KeyCode::Up => c.conflict_sel = c.conflict_sel.saturating_sub(1),
+                    KeyCode::Home | KeyCode::Char('g') => c.conflict_sel = 0,
+                    KeyCode::End | KeyCode::Char('G') => c.conflict_sel = last,
+                    KeyCode::PageDown => c.scroll = c.scroll.saturating_add(10),
+                    KeyCode::PageUp => c.scroll = c.scroll.saturating_sub(10),
+                    KeyCode::Char(ch @ ('k' | 'r')) => {
+                        let d = if ch == 'k' {
+                            HostDecision::Keep
+                        } else {
+                            HostDecision::Replace
+                        };
+                        match c.decide(d) {
+                            Some(name) => {
+                                if self.combine_preview(&mut c) {
+                                    self.msg = Some(Msg::Info(if ch == 'k' {
+                                        format!("{name}: the earlier block stays.")
+                                    } else {
+                                        format!("{name}: the later block replaces the earlier one.")
+                                    }));
+                                }
+                            }
+                            None => self.msg = Some(Msg::Info("No conflict to decide.".into())),
+                        }
+                    }
+                    KeyCode::Char('R') => {
+                        c.retire = !c.retire;
+                        let movable = c.preview.as_ref().map_or(Vec::new(), |p| {
+                            p.retirable
+                                .iter()
+                                .map(|f| self.ws.display_path(f))
+                                .collect()
+                        });
+                        let text = match (c.retire, movable.is_empty()) {
+                            (false, _) => "Retire off: every input stays where it is.".to_string(),
+                            (true, true) => {
+                                "Retire on: no Include loads a later input, so none moves."
+                                    .to_string()
+                            }
+                            (true, false) => format!(
+                                "Retire on: {} moves to ~/.ssh/retired/ after the write.",
+                                join_and(&movable)
+                            ),
+                        };
+                        self.msg = Some(Msg::Info(text));
+                    }
+                    KeyCode::Enter if self.combine_write(&mut c) => return,
+                    _ => {}
+                }
+            }
+        }
+        self.mode = Mode::Combine(Box::new(c));
+    }
+
+    /// A key in the `t` or `o` text entry.
+    fn combine_entry(&mut self, c: &mut Combine, entry: Entry, key: KeyEvent) {
+        let (mut text, is_output) = match entry {
+            Entry::AddPath(t) => (t, false),
+            Entry::Output(t) => (t, true),
+        };
+        let wrap = |t: String| {
+            if is_output {
+                Entry::Output(t)
+            } else {
+                Entry::AddPath(t)
+            }
+        };
+        match key.code {
+            KeyCode::Esc => {}
+            KeyCode::Backspace => {
+                text.pop();
+                c.entry = Some(wrap(text));
+            }
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                text.push(ch);
+                c.entry = Some(wrap(text));
+            }
+            KeyCode::Enter => {
+                let typed = text.trim();
+                let home = home_dir(&self.opts.env);
+                if is_output {
+                    c.output = (!typed.is_empty()).then(|| expand(typed, home.as_deref()));
+                    let shown = c
+                        .output_path()
+                        .map_or(String::new(), |p| self.ws.display_path(&p));
+                    self.msg = Some(Msg::Info(format!("Output: {shown}.")));
+                } else if !typed.is_empty() {
+                    let path = expand(typed, home.as_deref());
+                    if path.is_file() {
+                        c.add_path(path);
+                    } else {
+                        self.error(format!(
+                            "{typed} is not a file. Type the path of a config file."
+                        ));
+                    }
+                }
+            }
+            _ => c.entry = Some(wrap(text)),
+        }
+    }
+
+    // ----- cleanup -----
+
+    fn open_cleanup(&mut self) {
+        if !self.dirty().is_empty() {
+            self.error(DIRTY);
+            return;
+        }
+        self.mode = Mode::Cleanup(Box::new(Cleanup::new(&self.ws, &self.opts.env)));
+    }
+
+    /// Takes `next` as the workspace after it was saved.
+    fn adopt(&mut self, next: Workspace) {
+        self.ws = next;
+        for i in 0..self.ws.files.len() {
+            self.stamps[i] = stamp(&self.ws.files[i].path);
+            self.editors[i].set_text(&self.ws.files[i].original);
+        }
+        self.refresh(None);
+        self.show_selected_host();
+    }
+
+    /// Checks before a cleanup write: no unsaved text, no running probe,
+    /// the files read again when they changed on disk.
+    fn cleanup_ready(&mut self) -> bool {
+        if !self.dirty().is_empty() {
+            self.error(DIRTY);
+            return false;
+        }
+        if self.probe.is_some() {
+            self.error("Probes are running. Wait for them, or press Esc to abandon them.");
+            return false;
+        }
+        if let Err(e) = self.reload_if_changed() {
+            self.error(e);
+            return false;
+        }
+        true
+    }
+
+    /// Applies the recommendations of `chosen` through the core, as
+    /// `rustorm cleanup --apply` does, and reads the findings again.
+    fn cleanup_apply(&mut self, c: &mut Cleanup, chosen: Vec<usize>) {
+        if !self.cleanup_ready() {
+            return;
+        }
+        let mut next = self.ws.clone();
+        let change = match next.apply_cleanup(&c.report, &chosen) {
+            Ok(change) => change,
+            Err(Error::CleanupStale(host)) => {
+                c.reread(&self.ws, &self.opts.env);
+                self.error(format!(
+                    "{host} changed since the report; the findings are read again."
+                ));
+                return;
+            }
+            Err(e) => {
+                self.error(tui_error(&e));
+                return;
+            }
+        };
+        if let Err(e) = next.save(self.options()) {
+            self.error(tui_error(&e));
+            return;
+        }
+        self.adopt(next);
+        c.reread(&self.ws, &self.opts.env);
+        let mut parts = change.messages;
+        parts.push(remaining_findings(c.report.findings.len()));
+        self.msg = Some(Msg::Success(parts.join(" ")));
+    }
+
+    /// Folds every later name of the highlighted same-target finding into
+    /// its first name, as `rustorm cleanup --fold` does.
+    fn cleanup_fold(&mut self, c: &mut Cleanup) {
+        let Some(f) = c.report.findings.get(c.sel) else {
+            return;
+        };
+        if f.kind != FindingKind::SameTarget {
+            self.error(format!(
+                "f folds a same-target finding; {} is {}.",
+                f.names.join(", "),
+                f.kind.label()
+            ));
+            return;
+        }
+        let hosts: Vec<String> = f.definitions[1..].iter().map(|d| d.name.clone()).collect();
+        if !self.cleanup_ready() {
+            return;
+        }
+        let mut next = self.ws.clone();
+        let mut parts = Vec::new();
+        for host in &hosts {
+            let fresh = next.cleanup_report(None, &self.opts.env);
+            match next.fold_host(&fresh, host) {
+                Ok(change) => parts.extend(change.messages),
+                Err(e) => {
+                    self.error(tui_error(&e));
+                    return;
+                }
+            }
+        }
+        if let Err(e) = next.save(self.options()) {
+            self.error(tui_error(&e));
+            return;
+        }
+        self.adopt(next);
+        c.reread(&self.ws, &self.opts.env);
+        parts.push(remaining_findings(c.report.findings.len()));
+        self.msg = Some(Msg::Success(parts.join(" ")));
+    }
+
+    fn handle_cleanup(&mut self, mut c: Cleanup, key: KeyEvent) {
+        self.msg = None;
+        if c.help {
+            if matches!(
+                key.code,
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q')
+            ) {
+                c.help = false;
+            }
+            self.mode = Mode::Cleanup(Box::new(c));
+            return;
+        }
+        let n = c.report.findings.len();
+        let last = n.saturating_sub(1);
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(run) = self.probe.take() {
+                    run.abandon();
+                    self.msg = Some(Msg::Info("Probes abandoned; nothing written.".into()));
+                }
+                return;
+            }
+            KeyCode::Char('?') => c.help = true,
+            KeyCode::Down | KeyCode::Char('j') => c.sel = (c.sel + 1).min(last),
+            KeyCode::Up | KeyCode::Char('k') => c.sel = c.sel.saturating_sub(1),
+            KeyCode::Home | KeyCode::Char('g') => c.sel = 0,
+            KeyCode::End | KeyCode::Char('G') => c.sel = last,
+            KeyCode::Char(ch @ ('p' | 'P')) => {
+                if self.probe.is_some() {
+                    self.msg = Some(Msg::Info("Probes are already running.".into()));
+                } else if n == 0 {
+                    self.msg = Some(Msg::Info("No duplicates; nothing to probe.".into()));
+                } else {
+                    let prober = if ch == 'P' {
+                        Arc::clone(&self.auth_prober)
+                    } else {
+                        Arc::clone(&self.prober)
+                    };
+                    let run = ProbeRun::start(&c.report, prober, self.probe_timeout);
+                    self.msg = Some(Msg::Info(format!(
+                        "Probing {}.",
+                        plural(run.total, "definition", "definitions")
+                    )));
+                    self.probe = Some(run);
+                }
+            }
+            KeyCode::Char('a' | 'A' | 'f') if n == 0 => {
+                self.msg = Some(Msg::Info(format!(
+                    "Nothing to apply; {}",
+                    c.report.summary()
+                )));
+            }
+            KeyCode::Char('a') => {
+                let f = &c.report.findings[c.sel];
+                let names = f.names.join(", ");
+                match f.recommendation.action {
+                    Some(Action::Fold) => {
+                        self.msg = Some(Msg::Info(format!(
+                            "{names}: same target. Press f to fold; a never folds."
+                        )))
+                    }
+                    None => {
+                        let text = f
+                            .recommendation
+                            .text
+                            .replace("probe to decide", "probe to decide; press p")
+                            .replace(
+                                "probe with --auth to decide",
+                                "probe with an ssh login to decide; press P",
+                            )
+                            .replace(
+                                "decide with rustorm reconcile",
+                                "decide in the Conflicts view (C)",
+                            );
+                        self.error(format!("{names}: nothing to apply; {text}."));
+                    }
+                    Some(_) => {
+                        let sel = c.sel;
+                        self.cleanup_apply(&mut c, vec![sel]);
+                    }
+                }
+            }
+            KeyCode::Char('A') => {
+                let chosen = c.report.applicable();
+                if chosen.is_empty() {
+                    self.msg = Some(Msg::Info(
+                        "No recommendation to apply. Press p to probe, or f to fold.".into(),
+                    ));
+                } else {
+                    self.cleanup_apply(&mut c, chosen);
+                }
+            }
+            KeyCode::Char('f') => self.cleanup_fold(&mut c),
+            _ => {}
+        }
+        self.mode = Mode::Cleanup(Box::new(c));
+    }
+
     fn cycle_focus(&mut self, back: bool) {
         let mut order = vec![Focus::Table, Focus::Editor];
         if !self.sections.is_empty() {
@@ -1751,6 +2389,8 @@ impl App {
             KeyCode::Char('C') if self.ws.is_multi() => {
                 self.mode = Mode::Conflicts(Box::new(Conflicts::new(&self.ws)))
             }
+            KeyCode::Char('M') => self.open_combine(),
+            KeyCode::Char('X') => self.open_cleanup(),
             KeyCode::Down | KeyCode::Char('j') => {
                 let s = self.move_sel(1, len, cur);
                 self.table.select((len > 0).then_some(s));
@@ -1987,6 +2627,18 @@ impl App {
                 self.render_conflicts(frame, outer[0], &c);
                 if c.help {
                     self.render_help(frame, area);
+                }
+            }
+            Mode::Combine(c) => {
+                self.render_combine(frame, outer[0], &c);
+                if c.help {
+                    self.render_keys(frame, area, COMBINE_HELP);
+                }
+            }
+            Mode::Cleanup(c) => {
+                self.render_cleanup(frame, outer[0], &c);
+                if c.help {
+                    self.render_keys(frame, area, CLEANUP_HELP);
                 }
             }
             _ => {}
@@ -2238,6 +2890,22 @@ impl App {
             }
             (Mode::Help, _) => "Esc/?:close help",
             (Mode::Conflicts(c), _) if c.help => "Esc/?:close help",
+            (Mode::Combine(c), _) if c.help => "Esc/?:close help",
+            (Mode::Cleanup(c), _) if c.help => "Esc/?:close help",
+            (Mode::Combine(c), _) if c.entry.is_some() => "type a path  Enter:keep  Esc:cancel",
+            (Mode::Combine(c), _) if c.step == Step::Files => {
+                "?:help  Up/Down:move  Space:pick/unpick  b:make base  t:type a path  o:output  Enter:preview  Esc:cancel"
+            }
+            (Mode::Combine(_), _) => {
+                "?:help  Up/Down:conflict  k:keep earlier  r:replace with later  R:retire on/off  PgUp/PgDn:scroll  Enter:write  Esc:back"
+            }
+            (Mode::Cleanup(_), _) if self.probe.is_some() => {
+                "probing  ?:help  Up/Down:move  Esc:abandon probes and close"
+            }
+            (Mode::Cleanup(c), _) if c.report.findings.is_empty() => "?:help  Esc:close",
+            (Mode::Cleanup(_), _) => {
+                "?:help  Up/Down:move  p:probe  P:probe with ssh login  a:apply  A:apply all  f:fold  Esc:close"
+            }
             (Mode::Conflicts(c), _) if c.confirm.is_some() => "y:retire  any other key:cancel",
             (Mode::Conflicts(c), _) => match c.view {
                 View::List => {
@@ -2275,12 +2943,17 @@ impl App {
     }
 
     fn render_help(&self, frame: &mut Frame, area: Rect) {
-        let rows = help_rows(self.ws.is_multi());
+        self.render_keys(frame, area, &help_rows(self.ws.is_multi()));
+    }
+
+    /// A key overlay listing `rows`.
+    fn render_keys(&self, frame: &mut Frame, area: Rect, rows: &[(&str, &str, &str)]) {
         let lines: Vec<Line> = rows
             .iter()
             .map(|(k, ctx, act)| Line::from(format!(" {k:<17}{ctx:<22}{act}")))
             .collect();
-        let rect = centered(area, 72, rows.len() as u16 + 2);
+        let widest = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
+        let rect = centered(area, (widest + 3).max(72), rows.len() as u16 + 2);
         frame.render_widget(Clear, rect);
         frame.render_widget(
             Paragraph::new(lines).block(self.pane_block("Keys".into(), true)),
@@ -2489,6 +3162,287 @@ impl App {
             }
             frame.render_widget(Paragraph::new(lines), rows[1]);
         }
+    }
+
+    /// The Combine view over the panes: the file step or the preview.
+    fn render_combine(&self, frame: &mut Frame, area: Rect, c: &Combine) {
+        frame.render_widget(Clear, area);
+        let output = c
+            .output_path()
+            .map_or(String::new(), |p| self.ws.display_path(&p));
+        let title = match (c.step, &c.preview) {
+            (Step::Preview, Some(p)) => format!(
+                "Combine  preview into {output}  {}, {} undecided",
+                plural(p.conflicts.len(), "conflict", "conflicts"),
+                p.undecided().len()
+            ),
+            _ => "Combine  pick the base and the files to merge into it".to_string(),
+        };
+        let block = self.pane_block(title, true);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        match (c.step, &c.preview) {
+            (Step::Preview, Some(p)) => self.render_combine_preview(frame, inner, c, p),
+            _ => self.render_combine_files(frame, inner, c, &output),
+        }
+    }
+
+    fn render_combine_files(&self, frame: &mut Frame, area: Rect, c: &Combine, output: &str) {
+        let theme = self.opts.theme;
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let mut lines = vec![Line::from(Span::styled(
+            format!("  {:<10}file", "role"),
+            bold,
+        ))];
+        for (i, path) in c.candidates.iter().enumerate() {
+            let text = format!("  {:<10}{}", c.role(i), self.ws.display_path(path));
+            lines.push(if i == c.sel {
+                Line::from(Span::styled(
+                    text,
+                    Style::default().add_modifier(Modifier::REVERSED),
+                ))
+            } else {
+                Line::from(text)
+            });
+        }
+        lines.push(Line::from(""));
+        let base_note = if c.output.is_none() {
+            " (the base)"
+        } else {
+            ""
+        };
+        lines.push(Line::from(format!("  {:<10}{output}{base_note}", "output")));
+        match &c.entry {
+            Some(Entry::AddPath(t)) => lines.push(Line::from(Span::styled(
+                format!("  Add file: {t}{}", theme.caret()),
+                bold,
+            ))),
+            Some(Entry::Output(t)) => lines.push(Line::from(Span::styled(
+                format!("  Output (empty: the base): {t}{}", theme.caret()),
+                bold,
+            ))),
+            None => {}
+        }
+        frame.render_widget(Paragraph::new(lines), area);
+    }
+
+    fn render_combine_preview(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        c: &Combine,
+        p: &rustorm_core::CombinePreview,
+    ) {
+        let theme = self.opts.theme;
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let mut lines: Vec<Line> = Vec::new();
+        for a in &p.report.added {
+            lines.push(Line::from(format!(
+                "Host *: {} {} added from {}.",
+                a.key,
+                a.value,
+                self.ws.display_path(&a.from)
+            )));
+        }
+        for k in &p.report.skipped {
+            lines.push(Line::from(format!(
+                "Host *: {} {} from {} skipped, keeping {}.",
+                k.key,
+                k.value,
+                self.ws.display_path(&k.from),
+                k.kept
+            )));
+        }
+        let retiring = |f: &Path| c.retire && p.retirable.iter().any(|r| r == f);
+        for w in p.report.includes.iter().filter(|w| !retiring(&w.loads)) {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "Warning: Include {} in {} still loads {}.",
+                    w.pattern,
+                    self.ws.display_path(&w.file),
+                    self.ws.display_path(&w.loads)
+                ),
+                bold,
+            )));
+        }
+        let movable: Vec<String> = p
+            .retirable
+            .iter()
+            .map(|f| self.ws.display_path(f))
+            .collect();
+        lines.push(Line::from(match (c.retire, movable.is_empty()) {
+            (false, _) => "retire: off".to_string(),
+            (true, true) => "retire: on; no Include loads a later input, so none moves".to_string(),
+            (true, false) => format!("retire: on; moves {}", join_and(&movable)),
+        }));
+        lines.push(Line::from(""));
+        if p.conflicts.is_empty() {
+            lines.push(Line::from("no conflicts."));
+        } else {
+            let w = |n: u16| ((area.width.saturating_sub(4) * n) / 100) as usize;
+            let (hw, dw, fw) = (w(20), 12, w(30));
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  {:<hw$}{:<dw$}{:<fw$}later",
+                    "conflict", "decision", "earlier"
+                ),
+                bold,
+            )));
+            for (i, k) in p.conflicts.iter().enumerate() {
+                let decision = match k.decision {
+                    Some(HostDecision::Keep) => "keep",
+                    Some(HostDecision::Replace) => "replace",
+                    None => "undecided",
+                };
+                let cut = |s: &str, n: usize| elide_start(s, n.saturating_sub(1), theme.ellipsis());
+                let text = format!(
+                    "{} {:<hw$}{:<dw$}{:<fw$}{}",
+                    if i == c.conflict_sel { ">" } else { " " },
+                    cut(&k.name, hw),
+                    decision,
+                    cut(&self.ws.display_path(&k.first), fw),
+                    self.ws.display_path(&k.second)
+                );
+                let mut style = Style::default();
+                if i == c.conflict_sel {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
+                if k.decision.is_none() {
+                    style = style.patch(theme.error());
+                }
+                lines.push(Line::from(Span::styled(text, style)));
+            }
+        }
+        let half = area.height / 2;
+        let top_h = (lines.len() as u16).min(half.max(3));
+        let conflict = p.conflicts.get(c.conflict_sel);
+        let blocks_h = conflict.map_or(0, |k| {
+            let n = k
+                .first_text
+                .lines()
+                .count()
+                .max(k.second_text.lines().count()) as u16;
+            (n + 2).min(area.height.saturating_sub(top_h) / 2)
+        });
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(top_h),
+                Constraint::Length(blocks_h),
+                Constraint::Min(3),
+            ])
+            .split(area);
+        frame.render_widget(Paragraph::new(lines), parts[0]);
+        if let Some(k) = conflict {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(parts[1]);
+            let side = |title: String, text: &str, other: &str, chosen: bool| {
+                let lines: Vec<Line> = marked_lines(text, other)
+                    .into_iter()
+                    .map(|(l, differs)| {
+                        if differs {
+                            Line::from(Span::styled(l, bold))
+                        } else {
+                            Line::from(l)
+                        }
+                    })
+                    .collect();
+                let title = if chosen {
+                    format!("{title}{} written ", theme.ok())
+                } else {
+                    title
+                };
+                Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title))
+            };
+            frame.render_widget(
+                side(
+                    format!(" earlier {} ", self.ws.display_path(&k.first)),
+                    &k.first_text,
+                    &k.second_text,
+                    k.decision == Some(HostDecision::Keep),
+                ),
+                cols[0],
+            );
+            frame.render_widget(
+                side(
+                    format!(" later {} ", self.ws.display_path(&k.second)),
+                    &k.second_text,
+                    &k.first_text,
+                    k.decision == Some(HostDecision::Replace),
+                ),
+                cols[1],
+            );
+        }
+        let text: Vec<Line> = p.text.lines().map(|l| Line::from(l.to_string())).collect();
+        let total = text.len() as u16;
+        let scroll = c.scroll.min(total.saturating_sub(1));
+        frame.render_widget(
+            Paragraph::new(text).scroll((scroll, 0)).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" merged text, line {} of {total} ", scroll + 1)),
+            ),
+            parts[2],
+        );
+    }
+
+    /// The Cleanup view over the panes: each finding as `rustorm cleanup`
+    /// prints it, the highlighted one marked and bold.
+    fn render_cleanup(&self, frame: &mut Frame, area: Rect, c: &Cleanup) {
+        let theme = self.opts.theme;
+        frame.render_widget(Clear, area);
+        let mut title = format!("Cleanup  {}", c.report.summary());
+        if let Some(run) = &self.probe {
+            title.push_str(&format!("  probing {}/{}", run.done, run.total));
+        }
+        let block = self.pane_block(title, true);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let chunks = c.chunks();
+        let mut lines: Vec<Line> = Vec::new();
+        let mut sel_range = (0, 0);
+        for (ci, chunk) in chunks.iter().enumerate() {
+            if ci > 0 {
+                lines.push(Line::from(""));
+            }
+            let finding = c.report.findings.get(ci);
+            let selected = finding.is_some() && ci == c.sel;
+            if selected {
+                sel_range = (lines.len(), lines.len() + chunk.len());
+            }
+            let base = if selected {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            for (li, text) in chunk.iter().enumerate() {
+                let lead = if selected && li == 0 { "> " } else { "  " };
+                let def =
+                    finding.and_then(|f| li.checked_sub(1).and_then(|d| f.definitions.get(d)));
+                let line = match def {
+                    Some(d) => {
+                        let label = d.status_label();
+                        let cut = text.len().saturating_sub(label.len());
+                        let style = match d.status {
+                            Some(s) if s.works() => theme.success(),
+                            Some(s) if s.fails() => theme.error(),
+                            _ => Style::default(),
+                        };
+                        Line::from(vec![
+                            Span::styled(format!("{lead}{}", &text[..cut]), base),
+                            Span::styled(text[cut..].to_string(), base.patch(style)),
+                        ])
+                    }
+                    None => Line::from(Span::styled(format!("{lead}{text}"), base)),
+                };
+                lines.push(line);
+            }
+        }
+        let height = inner.height as usize;
+        let top = sel_range.1.saturating_sub(height).min(sel_range.0);
+        frame.render_widget(Paragraph::new(lines).scroll((top as u16, 0)), inner);
     }
 
     fn render_form(&self, frame: &mut Frame, area: Rect, form: &Form) {

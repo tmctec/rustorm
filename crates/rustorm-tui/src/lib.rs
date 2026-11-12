@@ -6,6 +6,8 @@
 //! through `rustorm-core`.
 
 pub mod app;
+mod cleanup;
+mod combine;
 mod conflicts;
 pub mod editor;
 pub mod hosts;

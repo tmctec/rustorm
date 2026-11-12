@@ -1,0 +1,59 @@
+#!/usr/bin/env expect -f
+# uicmb/uicln on a real pty: with HOME at a fixture, open Combine (M), pick
+# the last file, preview, keep the first conflict and replace the second,
+# turn retire on and write; then open Cleanup (X), probe (p), apply all (A)
+# and quit. The caller compares the files with the CLI's.
+# Usage: expect -f pty_flows.exp <rustorm-tui binary> <fixture home>
+set timeout 10
+set bin [lindex $argv 0]
+set home [lindex $argv 1]
+proc want {token what} {
+    expect {
+        $token {}
+        timeout { puts "\nFAIL: $what"; exit 2 }
+    }
+}
+spawn script -q /dev/null sh -c "stty rows 40 cols 150; HOME='$home' USER=tester $bin; echo EXIT=\$?"
+want "Hosts" "table not drawn"
+send "M"
+want "Combine" "Combine view not opened"
+# The last file in load order is legacy.
+send "G"
+sleep 0.2
+send " "
+sleep 0.2
+send "\r"
+want "undecided" "preview not drawn"
+want "merged" "merged text not drawn"
+send "k"
+sleep 0.2
+send "\033\[B"
+sleep 0.2
+send "r"
+sleep 0.2
+send "R"
+want "Retire" "retire not toggled"
+send "\r"
+want "retired" "combine not written"
+sleep 0.2
+send "X"
+want "Cleanup" "Cleanup view not opened"
+send "p"
+want "Probing" "probes did not start"
+# Each probe here is a connect to 127.0.0.1; they land well inside 2 s.
+# ratatui redraws only changed cells, so the status text is not matched.
+sleep 2
+send "A"
+want "dropped" "cleanup not applied"
+sleep 0.2
+send "\033"
+sleep 0.3
+send "q"
+expect {
+    -re {EXIT=([0-9]+)} { set code $expect_out(1,string) }
+    timeout { puts "\nFAIL: no exit after q"; exit 3 }
+}
+expect eof
+puts "\nRESULT exit=$code"
+if {$code != 0} { exit 1 }
+exit 0
