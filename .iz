@@ -1,0 +1,24 @@
+# Throwaway OpenSSH server for the `rustorm cleanup --auth` proof.
+# `make test-sshd-proof` generates target/sshd-proof/id_ed25519 before `up`
+# and starts sshd inside the container after it.
+[machine.sshd-proof]
+provider = "docker"
+kind = "container"
+os = "debian"
+image = "debian:bookworm-slim"
+needs = { kind = "container" }
+packages = ["openssh-server"]
+
+[[machine.sshd-proof.user]]
+name = "tester"
+shell = "/bin/bash"
+keys = ["target/sshd-proof/id_ed25519.pub"]
+
+[[machine.sshd-proof.ports]]
+guest = 22
+host = 22022
+address = "127.0.0.1"
+
+[[machine.sshd-proof.provision]]
+type = "shell"
+inline = ["mkdir -p /run/sshd"]
