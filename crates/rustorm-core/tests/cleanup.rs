@@ -119,7 +119,7 @@ fn statuses(f: &Finding) -> Vec<Option<ProbeStatus>> {
     f.definitions.iter().map(|d| d.status).collect()
 }
 
-// TESTMASTER: id=rustorm-core::cln_1_same_name_in_root_and_include_names_live_and_copy tier=? parallel=no
+// TESTMASTER: id=cln-1 tier=? parallel=no
 #[test]
 fn cln_1_same_name_in_root_and_include_names_live_and_copy() {
     let h = Home::new();
@@ -144,7 +144,7 @@ fn cln_1_same_name_in_root_and_include_names_live_and_copy() {
     assert_eq!(h.snapshot(), before);
 }
 
-// TESTMASTER: id=rustorm-core::cln_2_name_twice_in_one_file_marks_the_later_block_dead tier=? parallel=no
+// TESTMASTER: id=cln-2 tier=? parallel=no
 #[test]
 fn cln_2_name_twice_in_one_file_marks_the_later_block_dead() {
     let h = Home::new();
@@ -162,7 +162,7 @@ fn cln_2_name_twice_in_one_file_marks_the_later_block_dead() {
     assert_eq!(f.recommendation.text, "drop the dead block at ~/.ssh/config:5");
 }
 
-// TESTMASTER: id=rustorm-core::cln_3_two_names_one_endpoint_are_same_target tier=? parallel=no
+// TESTMASTER: id=cln-3 tier=? parallel=no
 #[test]
 fn cln_3_two_names_one_endpoint_are_same_target() {
     let h = Home::new();
@@ -182,7 +182,7 @@ fn cln_3_two_names_one_endpoint_are_same_target() {
     assert_eq!(f.recommendation.text, "settings differ (HostName, Port); left as is");
 }
 
-// TESTMASTER: id=rustorm-core::cln_4_no_duplicates_reports_none_and_probes_nothing tier=? parallel=no
+// TESTMASTER: id=cln-4 tier=? parallel=no
 #[test]
 fn cln_4_no_duplicates_reports_none_and_probes_nothing() {
     let h = Home::new();
@@ -203,7 +203,7 @@ fn cln_4_no_duplicates_reports_none_and_probes_nothing() {
     probe(&mut r, &Panics, 1);
 }
 
-// TESTMASTER: id=rustorm-core::cln_5_same_hostname_other_port_or_user_is_not_same_target tier=? parallel=no
+// TESTMASTER: id=cln-5 tier=? parallel=no
 #[test]
 fn cln_5_same_hostname_other_port_or_user_is_not_same_target() {
     let h = Home::new();
@@ -215,7 +215,7 @@ fn cln_5_same_hostname_other_port_or_user_is_not_same_target() {
     assert!(r.findings.is_empty(), "{}", r.text());
 }
 
-// TESTMASTER: id=rustorm-core::cln_6_listening_port_works tier=? parallel=no
+// TESTMASTER: id=cln-6 tier=? parallel=no
 #[test]
 fn cln_6_listening_port_works() {
     let (_l, port) = listening();
@@ -227,7 +227,7 @@ fn cln_6_listening_port_works() {
     assert_eq!(r.findings[0].definitions[0].status, Some(ProbeStatus::Works));
 }
 
-// TESTMASTER: id=rustorm-core::cln_7_closed_port_is_refused tier=? parallel=no
+// TESTMASTER: id=cln-7 tier=? parallel=no
 #[test]
 fn cln_7_closed_port_is_refused() {
     let (_l, port) = listening();
@@ -241,7 +241,7 @@ fn cln_7_closed_port_is_refused() {
     assert_eq!(live.status_label(), "refused");
 }
 
-// TESTMASTER: id=rustorm-core::cln_8_invalid_name_is_dns_failure tier=? parallel=no
+// TESTMASTER: id=cln-8 tier=? parallel=no
 #[test]
 fn cln_8_invalid_name_is_dns_failure() {
     let h = pair_home(&host("vps", "old-vps.invalid", 22), &host("vps", "older-vps.invalid", 22));
@@ -256,7 +256,7 @@ fn cln_8_invalid_name_is_dns_failure() {
     assert_eq!(r.findings[0].definitions[0].status_label(), "dns failure");
 }
 
-// TESTMASTER: id=rustorm-core::cln_9_non_routable_address_times_out_within_the_bound tier=? parallel=no
+// TESTMASTER: id=cln-9 tier=? parallel=no
 #[test]
 fn cln_9_non_routable_address_times_out_within_the_bound() {
     let h = pair_home(&host("vps", "10.255.255.1", 22), &host("vps", "10.255.255.1", 2222));
@@ -271,7 +271,7 @@ fn cln_9_non_routable_address_times_out_within_the_bound() {
     );
 }
 
-// TESTMASTER: id=rustorm-core::cln_10_each_definition_is_probed_alone_through_its_block_and_host_star tier=? parallel=no
+// TESTMASTER: id=cln-10 tier=? parallel=no
 #[test]
 fn cln_10_each_definition_is_probed_alone_through_its_block_and_host_star() {
     let (_l, port) = listening();
@@ -298,7 +298,7 @@ fn cln_10_each_definition_is_probed_alone_through_its_block_and_host_star() {
     assert_eq!(f.recommendation.action, Some(Action::TakeCopy));
 }
 
-// TESTMASTER: id=rustorm-core::cln_11_proxyjump_needs_auth_without_a_tcp_probe tier=? parallel=no
+// TESTMASTER: id=cln-11 tier=? parallel=no
 #[test]
 fn cln_11_proxyjump_needs_auth_without_a_tcp_probe() {
     // The HostName would be a dns failure if a TCP probe ran.
@@ -339,7 +339,7 @@ fn stub_ssh(h: &Home) -> (PathBuf, PathBuf) {
     (stub, log)
 }
 
-// TESTMASTER: id=rustorm-core::cln_12_auth_runs_batchmode_ssh_through_a_private_temp_config tier=? parallel=no
+// TESTMASTER: id=cln-12 tier=? parallel=no
 #[test]
 fn cln_12_auth_runs_batchmode_ssh_through_a_private_temp_config() {
     let h = pair_home(
@@ -379,7 +379,7 @@ fn cln_12_auth_runs_batchmode_ssh_through_a_private_temp_config() {
     assert!(!text.contains("Include"));
 }
 
-// TESTMASTER: id=rustorm-core::cln_13_live_fails_copy_works_takes_the_copy_with_a_backup tier=? parallel=no
+// TESTMASTER: id=cln-13 tier=? parallel=no
 #[test]
 fn cln_13_live_fails_copy_works_takes_the_copy_with_a_backup() {
     let (_l, port) = listening();
@@ -405,7 +405,7 @@ fn cln_13_live_fails_copy_works_takes_the_copy_with_a_backup() {
     assert_eq!(fs::read_to_string(h.path(".ssh/config.d/.vps~")).unwrap(), live);
 }
 
-// TESTMASTER: id=rustorm-core::cln_14_live_works_copy_fails_drops_the_copy_block tier=? parallel=no
+// TESTMASTER: id=cln-14 tier=? parallel=no
 #[test]
 fn cln_14_live_works_copy_fails_drops_the_copy_block() {
     let (_l, port) = listening();
@@ -429,7 +429,7 @@ fn cln_14_live_works_copy_fails_drops_the_copy_block() {
     assert_eq!(h.read(".ssh/config.d/vps.bak"), "Host printer\n    HostName 192.168.1.20\n");
 }
 
-// TESTMASTER: id=rustorm-core::cln_15_both_work_and_differ_stays_undecided_for_reconcile tier=? parallel=no
+// TESTMASTER: id=cln-15 tier=? parallel=no
 #[test]
 fn cln_15_both_work_and_differ_stays_undecided_for_reconcile() {
     let (_a, pa) = listening();
@@ -452,7 +452,7 @@ fn cln_15_both_work_and_differ_stays_undecided_for_reconcile() {
     assert_eq!(h.snapshot(), before);
 }
 
-// TESTMASTER: id=rustorm-core::cln_16_both_fail_gets_no_recommendation tier=? parallel=no
+// TESTMASTER: id=cln-16 tier=? parallel=no
 #[test]
 fn cln_16_both_fail_gets_no_recommendation() {
     let h = pair_home(
@@ -471,7 +471,7 @@ fn cln_16_both_fail_gets_no_recommendation() {
     assert!(r.applicable().is_empty());
 }
 
-// TESTMASTER: id=rustorm-core::cln_17_identical_copy_and_dead_block_are_dropped_live_untouched tier=? parallel=no
+// TESTMASTER: id=cln-17 tier=? parallel=no
 #[test]
 fn cln_17_identical_copy_and_dead_block_are_dropped_live_untouched() {
     let live = "Host vps\n    HostName vps.example.com\n\nHost nas\n    HostName nas.local\n    User me\n\nHost nas\n    HostName nas.local\n";
@@ -499,7 +499,7 @@ fn cln_17_identical_copy_and_dead_block_are_dropped_live_untouched() {
     assert!(h.load().cleanup_report(None, &h.env()).findings.is_empty());
 }
 
-// TESTMASTER: id=rustorm-core::cln_18_report_and_probe_write_nothing tier=? parallel=no
+// TESTMASTER: id=cln-18 tier=? parallel=no
 #[test]
 fn cln_18_report_and_probe_write_nothing() {
     let (_l, port) = listening();
@@ -517,7 +517,7 @@ fn cln_18_report_and_probe_write_nothing() {
 
 const TWINS: &str = "Host web\n    HostName web.example.com\n    User deploy\n\n# prod alias\nHost web-prod\n    HostName web.example.com\n    User deploy\n";
 
-// TESTMASTER: id=rustorm-core::cln_19_fold_makes_the_second_name_an_alias_and_removes_its_block tier=? parallel=no
+// TESTMASTER: id=cln-19 tier=? parallel=no
 #[test]
 fn cln_19_fold_makes_the_second_name_an_alias_and_removes_its_block() {
     let h = Home::new();
@@ -539,7 +539,7 @@ fn cln_19_fold_makes_the_second_name_an_alias_and_removes_its_block() {
     assert_eq!(h.read(".ssh/config~"), TWINS);
 }
 
-// TESTMASTER: id=rustorm-core::cln_20_fold_refuses_when_directives_differ tier=? parallel=no
+// TESTMASTER: id=cln-20 tier=? parallel=no
 #[test]
 fn cln_20_fold_refuses_when_directives_differ() {
     let h = Home::new();
@@ -556,7 +556,7 @@ fn cln_20_fold_refuses_when_directives_differ() {
     assert_eq!(h.read(".ssh/config"), text);
 }
 
-// TESTMASTER: id=rustorm-core::cln_21_fold_refuses_when_metadata_differs tier=? parallel=no
+// TESTMASTER: id=cln-21 tier=? parallel=no
 #[test]
 fn cln_21_fold_refuses_when_metadata_differs() {
     let h = Home::new();
@@ -571,7 +571,7 @@ fn cln_21_fold_refuses_when_metadata_differs() {
     assert_eq!(h.read(".ssh/config"), text);
 }
 
-// TESTMASTER: id=rustorm-core::cln_22_a_file_changed_since_the_report_is_refused_as_stale tier=? parallel=no
+// TESTMASTER: id=cln-22 tier=? parallel=no
 #[test]
 fn cln_22_a_file_changed_since_the_report_is_refused_as_stale() {
     let copy = "Host vps\n    HostName vps.example.com\n";
@@ -594,7 +594,7 @@ fn cln_22_a_file_changed_since_the_report_is_refused_as_stale() {
     assert_eq!(ws.fold_host(&r, "web-prod").unwrap_err().exit_code(), 1);
 }
 
-// TESTMASTER: id=rustorm-core::cln_23_an_unwritable_target_writes_no_file tier=? parallel=no
+// TESTMASTER: id=cln-23 tier=? parallel=no
 #[test]
 #[cfg(unix)]
 fn cln_23_an_unwritable_target_writes_no_file() {
@@ -617,7 +617,7 @@ fn cln_23_an_unwritable_target_writes_no_file() {
     assert!(!h.exists(".ssh/config.d/.vps~") && !h.exists(".ssh/config.d/.vps.bak~"));
 }
 
-// TESTMASTER: id=rustorm-core::cln_24_json_carries_kind_names_files_and_statuses tier=? parallel=no
+// TESTMASTER: id=cln-24 tier=? parallel=no
 #[test]
 fn cln_24_json_carries_kind_names_files_and_statuses() {
     let (_l, port) = listening();
@@ -655,7 +655,7 @@ fn cln_24_json_carries_kind_names_files_and_statuses() {
     assert_eq!(got, want);
 }
 
-// TESTMASTER: id=rustorm-core::cln_25_findings_remain_until_applied_then_none tier=? parallel=no
+// TESTMASTER: id=cln-25 tier=? parallel=no
 #[test]
 fn cln_25_findings_remain_until_applied_then_none() {
     // The exit codes themselves (1, 0, and 2 for --no-probe --auth) are
@@ -677,7 +677,7 @@ fn cln_25_findings_remain_until_applied_then_none() {
     assert_eq!(remaining_findings(3), "3 findings remain.");
 }
 
-// TESTMASTER: id=rustorm-core::cln_probes_stream_and_cancel tier=? parallel=no
+// TESTMASTER: id=cln-probe-stream tier=? parallel=no
 #[test]
 fn cln_probes_stream_each_result_and_stop_on_cancel() {
     use std::sync::atomic::AtomicBool;

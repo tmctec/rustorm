@@ -510,7 +510,7 @@ impl Home {
 const TWO_A: &str = "Host a\n    HostName a1\n\nHost b\n    HostName b1\n";
 const TWO_B: &str = "Host a\n    HostName a2\n\nHost b\n    HostName b2\n";
 
-// TESTMASTER: id=rustorm-core::cmb_1_keep_and_replace_override_the_policy_per_host tier=? parallel=yes
+// TESTMASTER: id=cmb-1 tier=? parallel=yes
 #[test]
 fn cmb_1_keep_and_replace_override_the_policy_per_host() {
     let inputs = vec![input("one", TWO_A), input("two", TWO_B)];
@@ -566,7 +566,7 @@ fn cmb_1_keep_and_replace_override_the_policy_per_host() {
     assert_eq!(h.read("one"), TWO_A);
 }
 
-// TESTMASTER: id=rustorm-core::cmb_2_an_unnamed_conflict_under_fail_writes_nothing tier=? parallel=yes
+// TESTMASTER: id=cmb-2 tier=? parallel=yes
 #[test]
 fn cmb_2_an_unnamed_conflict_under_fail_writes_nothing() {
     let h = Home::new();
@@ -590,7 +590,7 @@ fn cmb_2_an_unnamed_conflict_under_fail_writes_nothing() {
     assert!(!h.path("one~").exists());
 }
 
-// TESTMASTER: id=rustorm-core::cmb_3_a_named_host_that_is_no_conflict_is_a_usage_error tier=? parallel=yes
+// TESTMASTER: id=cmb-3 tier=? parallel=yes
 #[test]
 fn cmb_3_a_named_host_that_is_no_conflict_is_a_usage_error() {
     let inputs = vec![input("one", "Host nas\n"), input("two", "Host vps\n")];
@@ -605,7 +605,7 @@ fn cmb_3_a_named_host_that_is_no_conflict_is_a_usage_error() {
     assert_eq!((twice.exit_code(), twice.to_string()), (2, "a is decided twice.".to_string()));
 }
 
-// TESTMASTER: id=rustorm-core::cmb_4_retire_moves_an_included_input_into_a_private_retired_dir tier=? parallel=yes
+// TESTMASTER: id=cmb-4 tier=? parallel=yes
 #[test]
 #[cfg(unix)]
 fn cmb_4_retire_moves_an_included_input_into_a_private_retired_dir() {
@@ -635,7 +635,7 @@ fn cmb_4_retire_moves_an_included_input_into_a_private_retired_dir() {
     assert_eq!(h.read(".ssh/config~"), HOME_BASE);
 }
 
-// TESTMASTER: id=rustorm-core::cmb_5_without_retire_no_file_moves tier=? parallel=yes
+// TESTMASTER: id=cmb-5 tier=? parallel=yes
 #[test]
 fn cmb_5_without_retire_no_file_moves() {
     let h = Home::new();
@@ -645,7 +645,7 @@ fn cmb_5_without_retire_no_file_moves() {
     assert!(!h.path(".ssh/retired").exists());
 }
 
-// TESTMASTER: id=rustorm-core::cmb_6_an_input_no_include_loads_stays_and_says_so tier=? parallel=yes
+// TESTMASTER: id=cmb-6 tier=? parallel=yes
 #[test]
 fn cmb_6_an_input_no_include_loads_stays_and_says_so() {
     let h = Home::new();
@@ -663,7 +663,7 @@ fn cmb_6_an_input_no_include_loads_stays_and_says_so() {
     assert_eq!(out.retired[1].to, Some(h.path(".ssh/retired/extra")));
 }
 
-// TESTMASTER: id=rustorm-core::cmb_7_a_failed_write_retires_nothing tier=? parallel=no
+// TESTMASTER: id=cmb-7 tier=? parallel=no
 #[test]
 #[cfg(unix)]
 fn cmb_7_a_failed_write_retires_nothing() {
@@ -683,7 +683,7 @@ fn cmb_7_a_failed_write_retires_nothing() {
     assert!(!h.path("ro/out").exists());
 }
 
-// TESTMASTER: id=rustorm-core::cmb_8_retire_with_stdout_is_a_usage_error tier=? parallel=yes
+// TESTMASTER: id=cmb-8 tier=? parallel=yes
 #[test]
 fn cmb_8_retire_with_stdout_is_a_usage_error() {
     let h = Home::new();
@@ -696,7 +696,7 @@ fn cmb_8_retire_with_stdout_is_a_usage_error() {
     assert_eq!(h.read(".ssh/config.d/extra"), HOME_EXTRA);
 }
 
-// TESTMASTER: id=rustorm-core::cmb_9_a_taken_retired_name_gets_a_numeric_suffix tier=? parallel=yes
+// TESTMASTER: id=cmb-9 tier=? parallel=yes
 #[test]
 fn cmb_9_a_taken_retired_name_gets_a_numeric_suffix() {
     let h = Home::new();
