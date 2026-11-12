@@ -3,6 +3,7 @@
 use std::io::{self, IsTerminal, Stdout};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::Parser;
 use crossterm::event::{self, Event, KeyEventKind};
@@ -53,12 +54,22 @@ fn run(app: &mut App) -> anyhow::Result<()> {
     let mut terminal: Terminal<CrosstermBackend<Stdout>> =
         Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
+    let mut redraw = true;
     while !app.should_quit() {
-        terminal.draw(|f| app.render(f))?;
-        match event::read()? {
-            Event::Key(k) if k.kind == KeyEventKind::Press => app.handle(k),
-            _ => {}
+        if redraw {
+            terminal.draw(|f| app.render(f))?;
         }
+        // Poll so probe results landing off the UI thread repaint without
+        // a key press.
+        redraw = false;
+        if event::poll(Duration::from_millis(100))? {
+            match event::read()? {
+                Event::Key(k) if k.kind == KeyEventKind::Press => app.handle(k),
+                _ => {}
+            }
+            redraw = true;
+        }
+        redraw |= app.tick();
     }
     Ok(())
 }

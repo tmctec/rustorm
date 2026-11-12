@@ -5,11 +5,12 @@ use std::io::{BufRead, IsTerminal};
 use std::path::PathBuf;
 
 use rustorm_core::{
-    combine as core_combine, missing, pair_up, parse_filter, parse_option, project, render,
-    resolve_config_path, selected, write_text, AddSpec, Change, CloneSpec, CombineInput,
-    CombineReport, ConfigFile, Decision, EditSpec, Env, Error, Format, HostSelector, IncludeMatch,
-    IncludeStatus, KeyPick, ListRow, OnConflict, Pair, PairKind, Pick, Projected, ReconcileReport,
-    Result, UserConfig, Where, Workspace, WorkspaceRow, WriteOptions,
+    host_decisions, missing, pair_up, parse_filter, parse_option, project, remaining_findings,
+    render, resolve_config_path, selected, Action, AddSpec, Change, CleanupReport, CloneSpec,
+    CombineReport, CombineRequest, CombineRetired, ConfigFile, Decision, EditSpec, Env, Error,
+    Format, HostSelector, IncludeMatch, IncludeStatus, KeyPick, ListRow, OnConflict, Pair,
+    PairKind, Pick, Prober, Projected, ReconcileReport, Result, SshProber, TcpProber, UserConfig,
+    Where, Workspace, WorkspaceRow, WriteOptions, DEFAULT_JOBS,
 };
 use serde::Serialize;
 
@@ -115,7 +116,13 @@ fn keep_rows(
 
 /// Prints the projection of `rows` over `keys`. Returns 4 when a key is
 /// missing on a printed host and `--allow-missing` is off (D27), else 0.
-fn print_projection(ctx: &Ctx, ws: &Workspace, rows: &[WorkspaceRow], keys: &[String], opts: &ReadOpts) -> i32 {
+fn print_projection(
+    ctx: &Ctx,
+    ws: &Workspace,
+    rows: &[WorkspaceRow],
+    keys: &[String],
+    opts: &ReadOpts,
+) -> i32 {
     let projected: Vec<Projected> = rows
         .iter()
         .filter_map(|r| ws.view_of(r.file, &r.row.name).map(|v| project(&v, keys)))
@@ -296,8 +303,22 @@ pub fn run(cli: &Cli, command: &Cmd, user: &UserConfig, color: bool) -> Result<i
             files,
             output,
             on_conflict,
+            keep,
+            replace,
+            retire,
             stdout,
-        } => combine(&ctx, files, output.as_deref(), on_conflict, *stdout),
+        } => combine(
+            &ctx,
+            files,
+            output.as_deref(),
+            on_conflict,
+            &CombineFlags {
+                keep,
+                replace,
+                retire: *retire,
+                stdout: *stdout,
+            },
+        ),
         Cmd::RenameSection { old, new } => rename_section(&ctx, old, new),
         Cmd::Backup { file } => backup(&ctx, file.as_deref()),
         Cmd::Check => check(&ctx),
@@ -324,6 +345,24 @@ pub fn run(cli: &Cli, command: &Cmd, user: &UserConfig, color: bool) -> Result<i
                 all_copy: *all_copy,
                 drop_identical: *drop_identical,
                 retire: *retire,
+            },
+        ),
+        Cmd::Cleanup {
+            files,
+            no_probe,
+            auth,
+            timeout,
+            apply,
+            fold,
+        } => cleanup(
+            &ctx,
+            files,
+            &CleanupFlags {
+                no_probe: *no_probe,
+                auth: *auth,
+                timeout: *timeout,
+                apply: *apply,
+                fold,
             },
         ),
         Cmd::Completion { .. } | Cmd::Version => unreachable!("handled above"),
@@ -398,7 +437,14 @@ fn set(
     }
     let pairs = pair_up(pairs)?;
     let mut ws = ctx.load()?;
-    let change = ws.set_with_tags(&selector(regex, name), &pairs, append, tag, untag, ctx.file())?;
+    let change = ws.set_with_tags(
+        &selector(regex, name),
+        &pairs,
+        append,
+        tag,
+        untag,
+        ctx.file(),
+    )?;
     ctx.finish(&mut ws, change)?;
     Ok(0)
 }
@@ -657,8 +703,7 @@ fn search(ctx: &Ctx, pattern: &str, fixed: bool, read: &ReadArgs) -> Result<i32>
         // host, so the output names the field (docs/cli.md search).
         let elsewhere = matcher.is_match(&r.row.line())
             || r.row.aliases.iter().any(|a| matcher.is_match(a))
-            || r
-                .row
+            || r.row
                 .options
                 .iter()
                 .any(|(k, v)| matcher.is_match(k) || matcher.is_match(v));
@@ -753,6 +798,16 @@ struct CombineJson<'a> {
     output: Option<&'a std::path::Path>,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retired: Option<&'a [CombineRetired]>,
+}
+
+/// The per-host and output flags of `combine`.
+struct CombineFlags<'a> {
+    keep: &'a [String],
+    replace: &'a [String],
+    retire: bool,
+    stdout: bool,
 }
 
 fn combine(
@@ -760,47 +815,49 @@ fn combine(
     files: &[PathBuf],
     output: Option<&std::path::Path>,
     on_conflict: &str,
-    to_stdout: bool,
+    flags: &CombineFlags,
 ) -> Result<i32> {
     if files.len() < 2 {
         return Err(Error::Usage(
             "combine needs at least two files.".to_string(),
         ));
     }
+    if flags.retire && flags.stdout {
+        return Err(Error::Usage(
+            "--retire moves files after a write; drop --stdout.".to_string(),
+        ));
+    }
     let policy: OnConflict = on_conflict.parse()?;
-    let mut inputs = Vec::with_capacity(files.len());
-    for path in files {
-        let file = ConfigFile::load(path)?;
-        if !file.existed {
-            return Err(Error::Read {
-                path: path.clone(),
-                source: std::io::Error::from(std::io::ErrorKind::NotFound),
-            });
-        }
-        inputs.push(CombineInput {
-            path: path.clone(),
-            config: file.config,
-        });
-    }
-    let (result, report) = core_combine(inputs, policy, ctx.env.home.as_deref())?;
-    let text = result.render();
-    let destination = if to_stdout {
-        None
-    } else {
-        Some(output.unwrap_or(&files[0]))
+    let request = CombineRequest {
+        inputs: files.to_vec(),
+        output: output.map(std::path::Path::to_path_buf),
+        policy,
+        decisions: host_decisions(flags.keep, flags.replace)?,
+        retire: flags.retire,
     };
-    if let Some(dest) = destination {
-        write_text(dest, &text, ctx.write)?;
-    }
+    let home = ctx.env.home.as_deref();
+    let (text, report, destination, retired) = if flags.stdout {
+        let (text, report) = request.render(home)?;
+        (text, report, None, Vec::new())
+    } else {
+        let outcome = request.commit(None, ctx.write, home)?;
+        (
+            outcome.text,
+            outcome.report,
+            Some(outcome.output),
+            outcome.retired,
+        )
+    };
     if ctx.json {
         out::line(&to_json(&CombineJson {
             report: &report,
-            output: destination,
-            text: to_stdout.then_some(text.as_str()),
+            output: destination.as_deref(),
+            text: flags.stdout.then_some(text.as_str()),
+            retired: flags.retire.then_some(retired.as_slice()),
         }));
         return Ok(0);
     }
-    if to_stdout {
+    if flags.stdout {
         out::stdout(&text);
     }
     for a in &report.added {
@@ -820,7 +877,8 @@ fn combine(
             k.kept
         ));
     }
-    for w in &report.includes {
+    let moved = |p: &std::path::Path| retired.iter().any(|r| r.to.is_some() && r.from == p);
+    for w in report.includes.iter().filter(|w| !moved(&w.loads)) {
         out::stderr(&format!(
             "{} Include {} in {} still loads {}.\n",
             paint(
@@ -833,13 +891,16 @@ fn combine(
             w.loads.display()
         ));
     }
-    let summary = report.summary(destination);
-    if to_stdout {
+    let summary = report.summary(destination.as_deref());
+    if flags.stdout {
         if !ctx.quiet {
             out::stderr(&format!("{summary}\n"));
         }
     } else {
         ctx.say(&summary);
+    }
+    for r in &retired {
+        ctx.say(&r.message());
     }
     Ok(0)
 }
@@ -1300,4 +1361,134 @@ fn reconcile(ctx: &Ctx, files: &[String], flags: &ReconcileFlags) -> Result<i32>
     } else {
         0
     })
+}
+
+/// The flags of `cleanup`.
+struct CleanupFlags<'a> {
+    no_probe: bool,
+    auth: bool,
+    timeout: u64,
+    apply: bool,
+    fold: &'a [String],
+}
+
+/// Asks once per finding with a recommendation: `[a]pply` (or `[f]old` on
+/// a same-target finding) / `[s]kip` / `[q]uit`. Returns the findings to
+/// apply and the names to fold.
+fn ask_cleanup(report: &CleanupReport) -> Result<(Vec<usize>, Vec<String>)> {
+    let mut apply = Vec::new();
+    let mut folds = Vec::new();
+    for (i, f) in report.findings.iter().enumerate() {
+        let Some(action) = f.recommendation.action else {
+            continue;
+        };
+        let names = f.names.join(", ");
+        if action == Action::Fold {
+            let prompt = format!(
+                "{names}: {}. [f]old / [s]kip / [q]uit?",
+                f.recommendation.text
+            );
+            match ask(&prompt, &['f', 's', 'q'])? {
+                'f' => folds.extend(f.definitions[1..].iter().map(|d| d.name.clone())),
+                's' => {}
+                _ => break,
+            }
+        } else {
+            let prompt = format!(
+                "{names}: {}. [a]pply / [s]kip / [q]uit?",
+                f.recommendation.text
+            );
+            match ask(&prompt, &['a', 's', 'q'])? {
+                'a' => apply.push(i),
+                's' => {}
+                _ => break,
+            }
+        }
+    }
+    Ok((apply, folds))
+}
+
+/// `cleanup`: report every duplicate, probe each definition alone, then
+/// apply and fold (from flags or on a terminal), save, and count what
+/// remains.
+fn cleanup(ctx: &Ctx, files: &[String], flags: &CleanupFlags) -> Result<i32> {
+    if flags.no_probe && flags.auth {
+        return Err(Error::Usage("--no-probe and --auth conflict.".to_string()));
+    }
+    if flags.timeout == 0 {
+        return Err(Error::Usage("--timeout must be at least 1.".to_string()));
+    }
+    let changes = flags.apply || !flags.fold.is_empty();
+    if ctx.json && changes {
+        return Err(Error::Usage(
+            "--json prints the report only; drop it to apply or fold.".to_string(),
+        ));
+    }
+    let mut ws = ctx.load_read()?;
+    let scope = if files.is_empty() {
+        None
+    } else {
+        Some(ws.reconcile_scope(files)?)
+    };
+    let mut report = ws.cleanup_report(scope.as_deref(), &ctx.env);
+    let interactive = !changes && !ctx.json && stdin_is_terminal();
+    // Folding alone needs no probe: it depends on the settings only.
+    let probe = !flags.no_probe && (flags.apply || flags.fold.is_empty());
+    if probe && !report.findings.is_empty() {
+        let prober: Box<dyn Prober> = if flags.auth {
+            Box::new(SshProber::from_env())
+        } else {
+            Box::new(TcpProber)
+        };
+        report.probe(
+            prober.as_ref(),
+            std::time::Duration::from_secs(flags.timeout),
+            DEFAULT_JOBS,
+            None,
+            &mut |_, _| {},
+        );
+    }
+    let listed_code = i32::from(!report.findings.is_empty());
+    if ctx.json {
+        out::line(&to_json(&report));
+        return Ok(listed_code);
+    }
+    if !changes && !interactive {
+        out::stdout(&report.text());
+        return Ok(listed_code);
+    }
+    let (chosen, folds) = if interactive {
+        out::stdout(&report.text());
+        if report.findings.is_empty() {
+            return Ok(0);
+        }
+        ask_cleanup(&report)?
+    } else {
+        let chosen = if flags.apply {
+            report.applicable()
+        } else {
+            Vec::new()
+        };
+        (chosen, flags.fold.to_vec())
+    };
+    // Read again: a block changed on disk since the report is refused as
+    // stale, never applied blind.
+    ws = ctx.load()?;
+    let mut messages = Vec::new();
+    if !chosen.is_empty() {
+        let change = ws.apply_cleanup(&report, &chosen)?;
+        messages.extend(change.messages);
+    }
+    for host in &folds {
+        let fresh = ws.cleanup_report(scope.as_deref(), &ctx.env);
+        let change = ws.fold_host(&fresh, host)?;
+        messages.extend(change.messages);
+    }
+    ws.save(ctx.write)?;
+    for m in &messages {
+        ctx.say(m);
+    }
+    let left = ws.cleanup_report(scope.as_deref(), &ctx.env).findings.len();
+    ctx.say(&remaining_findings(left));
+    Ok(i32::from(left > 0))
 }

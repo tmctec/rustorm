@@ -9,6 +9,9 @@ use crate::cli::{Cli, Shell};
 const HOST_COMMANDS: &str =
     "edit set update unset clone copy cp move rename mv delete rm del show alias unalias";
 
+/// Flags whose value is an existing host name.
+const HOST_FLAGS: &[&str] = &["fold", "keep", "replace", "take-copy", "keep-live"];
+
 /// Every positional whose help starts with this names an existing host.
 const HOST_HELP: &str = "Existing host name";
 
@@ -31,6 +34,9 @@ _rustorm_with_hosts() {
     case "${COMP_WORDS[COMP_CWORD-1]}" in
         --filter|--where)
             COMPREPLY=( $(compgen -W "__KEYS__" -- "$cur") )
+            return 0 ;;
+        __HOST_FLAGS__)
+            COMPREPLY=( $(compgen -W "$(rustorm list -n 2>/dev/null)" -- "$cur") )
             return 0 ;;
     esac
     for ((i = 1; i < COMP_CWORD; i++)); do
@@ -70,11 +76,27 @@ pub fn script(shell: Shell) -> String {
             "{script}{}",
             BASH_HOSTS
                 .replace("__HOST_COMMANDS__", HOST_COMMANDS)
+                .replace(
+                    "__HOST_FLAGS__",
+                    &HOST_FLAGS
+                        .iter()
+                        .map(|f| format!("--{f}"))
+                        .collect::<Vec<_>>()
+                        .join("|")
+                )
                 .replace("__KEYS__", &keys)
         ),
-        Shell::Fish => format!(
-            "{script}complete -c rustorm -n \"__fish_rustorm_using_subcommand {HOST_COMMANDS}\" -f -a \"(rustorm list -n 2>/dev/null)\"\ncomplete -c rustorm -l filter -x -a \"{keys}\"\ncomplete -c rustorm -l where -x -a \"{keys}\"\n"
-        ),
+        Shell::Fish => {
+            let flags: String = HOST_FLAGS
+                .iter()
+                .map(|f| {
+                    format!("complete -c rustorm -l {f} -x -a \"(rustorm list -n 2>/dev/null)\"\n")
+                })
+                .collect();
+            format!(
+                "{script}complete -c rustorm -n \"__fish_rustorm_using_subcommand {HOST_COMMANDS}\" -f -a \"(rustorm list -n 2>/dev/null)\"\ncomplete -c rustorm -l filter -x -a \"{keys}\"\ncomplete -c rustorm -l where -x -a \"{keys}\"\n{flags}"
+            )
+        }
         Shell::Powershell => script,
     }
 }
@@ -89,6 +111,11 @@ fn zsh_hosts(script: &str, keys: &str) -> String {
             out.push_str(&line.replace(":_default'", ":_rustorm_hosts'"));
         } else if line.contains("--filter=[") || line.contains("--where=[") {
             out.push_str(&line.replace(":_default'", ":_rustorm_keys'"));
+        } else if HOST_FLAGS
+            .iter()
+            .any(|f| line.contains(&format!("--{f}=[")))
+        {
+            out.push_str(&line.replace(":_default'", ":_rustorm_hosts'"));
         } else {
             out.push_str(line);
         }

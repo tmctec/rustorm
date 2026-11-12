@@ -81,6 +81,24 @@ test-reconcile:  ## Run the reconcile suites across core, CLI, TUI, GUI and pari
 	@./makehelp.sh test -p rustorm-gui --test reconcile
 	@./makehelp.sh test -p rustorm-parity --test parity -- par_16 par_17 par_18
 
+.PHONY: test-combine
+test-combine:  ## Run the combine suites across core, CLI, TUI and GUI (combine-*, cmb-*, uicmb-*)
+	@./makehelp.sh test -p rustorm-core --test combine
+	@./makehelp.sh test -p rustorm --test cli_cases -- combine cmb_
+	@./makehelp.sh test -p rustorm-tui --test combine
+	@./makehelp.sh test -p rustorm-gui --test combine
+
+.PHONY: test-cleanup
+test-cleanup:  ## Run the cleanup suites across core, CLI, TUI and GUI (cln-*, uicln-*)
+	@./makehelp.sh test -p rustorm-core --test cleanup
+	@./makehelp.sh test -p rustorm --test cli_cases -- cleanup cln_
+	@./makehelp.sh test -p rustorm-tui --test cleanup
+	@./makehelp.sh test -p rustorm-gui --test cleanup
+
+.PHONY: test-sshd-proof
+test-sshd-proof: build  ## Prove `rustorm cleanup --auth` against a real sshd in the .iz sshd-proof container (needs izmachine + docker)
+	@./scripts/sshd-proof.sh
+
 .PHONY: test-cli
 test-cli:  ## Run the rustorm CLI tests, including every docs/cli.md example
 	@./makehelp.sh test -p rustorm
@@ -96,7 +114,7 @@ test-gui:  ## Run the rustorm-gui kittest suite
 GUI_WALKTHROUGH ?= target/gui-walkthrough.txt
 
 .PHONY: test-parity
-test-parity:  ## Run the same 18 operations in the TUI and the GUI (and the CLI for reconcile) and compare the files they write
+test-parity:  ## Run the same 22 operations in the TUI and the GUI (and the CLI for reconcile, combine and cleanup) and compare the files they write
 	@./makehelp.sh test -p rustorm-parity
 
 .PHONY: fixtures-read
@@ -104,7 +122,7 @@ fixtures-read: build  ## Regenerate the docs/cli.md Reading output fixtures with
 	@./scripts/make-read-fixtures.sh
 
 .PHONY: test-gui-walkthrough
-test-gui-walkthrough:  ## Drive the GUI follow, settings (filled/all, Add setting, Notes & location), Conflicts and editor completion flows; write what they show to GUI_WALKTHROUGH
+test-gui-walkthrough:  ## Drive the GUI follow, settings (filled/all, Add setting, Notes & location), Conflicts, Combine, Cleanup and editor completion flows; write what they show to GUI_WALKTHROUGH
 	@RUSTORM_GUI_EVIDENCE=$(abspath $(GUI_WALKTHROUGH)) ./makehelp.sh test -p rustorm-gui --test settings gui_walkthrough -- --ignored
 	@echo "walkthrough written to $(GUI_WALKTHROUGH)"
 

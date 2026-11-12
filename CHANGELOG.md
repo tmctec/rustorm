@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here. Format follows [Keep a Changelog](https://keepachangelog.com).
 
+## [coati] - 2026-11-12
+
+### Added
+- `rustorm cleanup` (alias `dedupe`, D32–D37, F-62): finds every duplicate host in the workspace — same name in two files (live/copy, paired as `reconcile` pairs them), dead blocks (a name defined twice in one file), and same target (different names reaching the same user@hostname:port with the same ProxyJump/ProxyCommand). Probes each definition alone through a temp config holding only its block plus `Host *`: a TCP connect by default (`works`, `refused`, `dns failure`, `timeout`, `unreachable`, `needs --auth` for proxied hosts), or with `--auth` a `ssh -o BatchMode=yes <host> true` login (`auth failure`). Recommends taking the copy when only the copy works, keeping live and dropping the copy when only live works, and dropping identical copies and dead blocks; pairs where both work and differ, or both fail, stay undecided. `--apply` applies the recommendations through the reconcile engine with backups, `--fold HOST` adds HOST to the first same-target name's `Host` line (refused when directives or metadata differ), `FILE...` scopes, `--no-probe`, `--timeout`, `--json`, per-finding terminal prompts. `RUSTORM_SSH` names the ssh program.
+- `rustorm combine --keep HOST` / `--replace HOST` decide one conflict each over `--on-conflict` (a named host that is no conflict is exit 2); `--retire` moves each merged input an `Include` still loads to `~/.ssh/retired/` after the write.
+- rustorm-core: `cleanup` module (`Workspace::cleanup_report`, `Prober` trait with `TcpProber` and `SshProber`, `run_probes` with streaming and cancel, `apply_cleanup`, `fold_host`); combine `CombineRequest::preview`/`commit` with per-input fingerprints refusing stale writes, `HostDecision`; reconcile `Decision::DropCopy`.
+- rustorm-tui: `M` opens Combine (pick base, inputs and output, preview, `k`/`r` per conflict, `R` retire, `Enter` write) and `X` opens Cleanup (`p`/`P` probe in the background, `a`/`A` apply, `f` fold); `App::set_prober`, `set_auth_prober`, `set_probe_timeout`.
+- rustorm-gui: **Combine…** and **Cleanup…** dialogs (File > Combine Files…, Edit > Clean Up Duplicates…) with background probing; `rustorm-gui --no-backup`; `App::set_prober`/`with_prober`, `set_write_options`/`with_write_options`.
+- Tests: core cln-1..25 and cmb-1..9, CLI cleanup/combine cases and every new docs/cli.md example, TUI and GUI uicmb-1..9 and uicln-1..6 plus a TUI pty flow, parity par-19..22 (CLI binary, TUI, GUI and core leave byte-identical trees and messages, stale inputs refused alike); `make test-combine`, `make test-cleanup`, `make test-sshd-proof` (a real OpenSSH container from `.iz`, `scripts/sshd-proof.sh`).
+
+### Fixed
+- A HOME containing a doubled slash (as `mktemp` gives under `TMPDIR=/tmp/`) made a write back up an included file as a plain `<file>~`, which the `Include` wildcard then loaded as a duplicate; the backup is `.<file>~` again.
+
+### Changed
+- `check` points at `cleanup` beside `reconcile` for a host defined in two files.
+- Shell completion offers host names for `--fold`, `--keep`, `--replace`, `--take-copy` and `--keep-live`.
+- docs: USERGUIDE "which command" table, combine decisions and retire, "Finding duplicates and testing which one works"; tui.md and gui.md Combine and Cleanup; README quick start.
+
 ## [gannet] - 2026-10-03
 
 ### Added

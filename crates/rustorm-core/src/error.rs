@@ -55,6 +55,15 @@ pub enum Error {
     #[error("{}", crate::combine::conflicts_message(.0))]
     CombineConflicts(Vec<crate::combine::Conflict>),
 
+    /// `combine` with `--keep`/`--replace` left conflicts no flag names,
+    /// under `--on-conflict fail`.
+    #[error("{}", crate::combine::undecided_message(.0))]
+    CombineUndecided(Vec<crate::combine::Conflict>),
+
+    /// A combine input changed on disk since its preview.
+    #[error("{0} changed since the preview; preview again.")]
+    CombineStale(String),
+
     /// A connection URI that does not parse.
     #[error("{uri} is not a valid connection URI: {reason}")]
     InvalidUri {
@@ -214,6 +223,10 @@ pub enum Error {
     #[error("{0} changed since the report; reconcile again.")]
     ReconcileStale(String),
 
+    /// A `cleanup` change for a block that changed since the report.
+    #[error("{0} changed since the report; run cleanup again.")]
+    CleanupStale(String),
+
     /// `reconcile --retire` naming the root config.
     #[error("{0} is the root config and never retires.")]
     RetireRoot(String),
@@ -265,6 +278,9 @@ impl Error {
             | Error::AmbiguousFile { .. }
             | Error::UnknownFile(_)
             | Error::ReconcileStale(_)
+            | Error::CleanupStale(_)
+            | Error::CombineUndecided(_)
+            | Error::CombineStale(_)
             | Error::RetireRoot(_)
             | Error::RetireUnresolved { .. } => 1,
             Error::MoveNeedsTarget

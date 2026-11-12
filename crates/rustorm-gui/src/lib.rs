@@ -9,5 +9,6 @@ pub mod ops;
 pub mod rows;
 
 pub use app::{
-    App, ConflictsView, Dialog, Form, FormMode, RetireView, Tab, DISCARD_ALL_LABEL, DISCARD_LABEL,
+    recommendation_text, App, CleanupView, CombineFile, CombineView, ConflictsView, Dialog, Form,
+    FormMode, RetireView, Tab, DISCARD_ALL_LABEL, DISCARD_LABEL,
 };

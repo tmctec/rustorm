@@ -19,11 +19,15 @@
 //!   with every command routed to the file it changes.
 //! - [`reconcile`](mod@reconcile): hosts defined in two or more files,
 //!   paired live against copy, decided, and retired copies.
+//! - [`cleanup`](mod@cleanup): every duplicate host (same name, dead block,
+//!   same target), probed alone with an injectable [`Prober`], applied
+//!   through the reconcile engine, and folded.
 //! - [`userconfig`]: rustorm's own TOML config (command aliases, defaults).
 //! - [`Error`]: one error type with CLI messages and exit codes.
 #![warn(missing_docs)]
 
 pub mod banner;
+pub mod cleanup;
 pub mod combine;
 pub mod error;
 pub mod figlet;
@@ -41,9 +45,16 @@ pub mod uri;
 pub mod userconfig;
 pub mod workspace;
 
+pub use cleanup::{
+    classify_ssh, remaining_findings, run_probes, tcp_probe, Action, CleanupReport, Definition,
+    Endpoint, Finding, FindingKind, ProbeResult, ProbeStatus, ProbeTarget, Prober, Recommendation,
+    Role, SshProber, TcpProber, DEFAULT_JOBS, DEFAULT_TIMEOUT, SSH_ENV,
+};
 pub use combine::{
-    combine, CombineInput, CombineReport, Conflict, DefaultsAdded, DefaultsSkipped, IncludeWarning,
-    OnConflict,
+    combine, combine_with, host_decisions, load_inputs, CombineInput, CombineOutcome,
+    CombinePreview, CombineReport, CombineRequest, CombineRetired, Conflict, DefaultsAdded,
+    DefaultsSkipped, Fingerprint, HostDecision, HostDecisions, IncludeWarning, OnConflict,
+    PreviewConflict,
 };
 pub use error::{join_and, Error, Result};
 pub use include::{

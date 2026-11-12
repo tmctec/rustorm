@@ -39,6 +39,12 @@ This document is the contract the implementation is built against. Each command 
 | D29 | The live definition is the one ssh reads first: the files an `Include` line loads are read where the line stands, so a host in an included file is live over the same host below that `Include` in the root, and a file that looks like a backup is live when it sorts first. `reconcile` says so whenever a backup is the live one. | Treat the non-backup file, or the root, as live | agreed |
 | D30 | Two definitions are identical when their directives (canonical key case, whitespace collapsed, in order) and their metadata lines match. Plain comments, blank lines and indentation never make a conflict; a metadata difference does. | Compare bytes | agreed |
 | D31 | Taking the copy keeps the live `Host` line (its aliases), its section and its place; only the body lines and the metadata lines come from the copy. Per-key picks exist on a terminal and in the TUI and GUI. | Replace the whole block | agreed |
+| D32 | `combine --keep HOST` and `--replace HOST` decide one conflict each and override `--on-conflict` for that host. A conflict no flag names falls to the policy, so under `fail` it is listed and nothing is written. A named host that is not a conflict is a usage error, exit 2. | One policy for every conflict | agreed |
+| D33 | `combine --retire` moves each later input that an `Include` still loads to `~/.ssh/retired/<name>` (`.1`, `.2`, ... when taken) after a successful write. An input no `Include` loads stays where it is and the output says so. `--retire` with `--stdout` is a usage error. | Retire every input; delete the inputs | agreed |
+| D34 | `cleanup` (alias `dedupe`) finds every kind of duplicate host: `same name` (a host in two workspace files, live and copy as `reconcile` pairs them), `dead` (a name defined twice in one file) and `same target` (different names that reach the same `user@hostname:port`). It is read-only unless `--apply` or `--fold` is given; every write goes through the `reconcile` engine after a backup, and no file is ever deleted. | Extend `check` or `reconcile` | agreed |
+| D35 | `cleanup` probes each definition alone, through a temp config holding only its block and the workspace's `Host *` blocks, so a copy ssh never reads is tested too. `Include` and `Match` lines stay out of it. The default probe is a TCP connect that sends no data; `--auth` runs `ssh -o BatchMode=yes <name> true`. A probe reaches only the hosts and ports the config names. | Probe through the live config | agreed |
+| D36 | `cleanup` recommends only what the probes show: the copy when only the copy works, the live definition when only it works, and dropping identical copies and dead blocks that add nothing. When live and copy both work and differ it sends you to `reconcile`; when both fail it says so and recommends nothing. | Keep the live definition by default | agreed |
+| D37 | `cleanup --fold HOST` makes `HOST` an alias on the `Host` line of its first same-target name and removes `HOST`'s block. It refuses, exit 2, when the directives or the metadata lines differ (D30). `--apply` never folds. | Fold and keep the first name's metadata | agreed |
 
 ## Synopsis
 
@@ -52,7 +58,7 @@ rustorm [GLOBAL OPTIONS] <COMMAND> [ARGS]
 |---|---|
 | `-c, --config <FILE>` | Operate on `FILE` instead of `~/.ssh/config`. |
 | `--no-backup` | Do not write `<config>~` before changing the file. |
-| `--json` | Emit JSON instead of text on `list`, `show`, `dump`, `search`, `check`, `includes`, `reconcile`. This is the machine interface; there is no web API. On `list`, `show` and `search` it is the same as `--format json` (see Reading output). |
+| `--json` | Emit JSON instead of text on `list`, `show`, `dump`, `search`, `check`, `includes`, `reconcile`, `cleanup` and `combine`. This is the machine interface; there is no web API. On `list`, `show` and `search` it is the same as `--format json` (see Reading output). |
 | `--no-color` | Disable ANSI color. `NO_COLOR` in the environment does the same. |
 | `-q, --quiet` | Suppress success messages. Errors still print. |
 | `-s, --section <NAME>` | Section for `add`, `edit`, `clone`, `move`, `list`, `show` and `search`; accepted before or after the command. On the three read commands it selects hosts, the same as `--where section=NAME`. |
@@ -83,6 +89,7 @@ Canonical name first. Every alias in the third column is accepted on the command
 | `backup` | `backup` | automatic `config~` | — | F-15 |
 | `check` | — | TODO item | `lint` | F-16 |
 | `reconcile` | — | — | `resolve` | F-61 |
+| `cleanup` | — | — | `dedupe` | F-62 |
 | `completion` | contrib script | — | — | F-17 |
 | `sections` | — | — | — | F-20 |
 | `rename-section` | — | — | — | F-21 |
@@ -1034,7 +1041,8 @@ Origin: new · Status: v1 · Aliases: `merge`
 **Synopsis**
 
 ```
-rustorm combine <FILE> <FILE>... [-o <OUTPUT>] [--on-conflict fail|keep|replace] [--stdout]
+rustorm combine <FILE> <FILE>... [-o <OUTPUT>] [--on-conflict fail|keep|replace]
+                [--keep <HOST>]... [--replace <HOST>]... [--retire] [--stdout]
 ```
 
 **Description**
@@ -1057,7 +1065,11 @@ A **conflict** is a host whose primary name or alias is already in the result. `
 | `keep` | Keep the earlier file's block byte for byte; drop the later one. |
 | `replace` | Replace the earlier block with the later one, in the earlier block's place and section. |
 
-The summary line counts the result: `combined N files into OUTPUT: H hosts, S sections, C conflicts.` With `--stdout` the merged text is stdout and the summary goes to stderr. `--json` replaces every line with one object: `{"files": N, "hosts": H, "sections": S, "conflicts": [...], "added": [...], "skipped": [...], "includes": [...], "output": "..."}`; with `--stdout`, `output` is `null` and a `text` field carries the merged file.
+`--keep HOST` and `--replace HOST` decide one conflict each, whatever the policy (D32). `HOST` is the duplicated name or any other name on either block's `Host` line. A conflict no flag names falls to `--on-conflict`, so under `fail` the conflicts left undecided are listed and nothing is written. A named host that is not a conflict, or a host named twice, is a usage error.
+
+**Retiring.** `--retire` runs after a successful write (D33). Each later input that an `Include` line of an input still loads moves to `~/.ssh/retired/<name>` (created with mode `0700`; an existing name gets `.1`, `.2`, ...), so ssh reads each host the result holds only once. That input's `still loads` warning gives way to `<input> retired to <path>.` An input no `Include` loads stays where it is: `<input>: no Include loads it; not retired.` The first input never moves. A failed write retires nothing. `--retire` with `--stdout` is a usage error. No file is ever deleted.
+
+The summary line counts the result: `combined N files into OUTPUT: H hosts, S sections, C conflicts.` With `--stdout` the merged text is stdout and the summary goes to stderr. `--json` replaces every line with one object: `{"files": N, "hosts": H, "sections": S, "conflicts": [...], "added": [...], "skipped": [...], "includes": [...], "output": "..."}`; with `--stdout`, `output` is `null` and a `text` field carries the merged file. With `--retire` a `retired` list holds one `{"from": "...", "to": "..."}` per later input, `to` `null` for an input no `Include` loads.
 
 **Options**
 
@@ -1065,6 +1077,9 @@ The summary line counts the result: `combined N files into OUTPUT: H hosts, S se
 |---|---|
 | `-o, --output <FILE>` | Write the result to `FILE` instead of the first input. Backed up first only if it exists. |
 | `--on-conflict <POLICY>` | `fail`, `keep` or `replace`. Default `fail`. |
+| `--keep <HOST>` | Keep the earlier block of the conflict `HOST`. Repeatable. |
+| `--replace <HOST>` | Put the later block of the conflict `HOST` in the earlier block's place. Repeatable. |
+| `--retire` | After the write, move each later input an `Include` still loads to `~/.ssh/retired/`. |
 | `--stdout` | Print the result; write no file and no backup. |
 
 **Examples**
@@ -1111,11 +1126,35 @@ combined 2 files: 5 hosts, 0 sections, 0 conflicts.
 
 $ rustorm combine ~/.ssh/config
 error: combine needs at least two files.
+
+$ rustorm combine ~/.ssh/config ~/.ssh/config.d/legacy --keep nas --replace vps
+warning: Include config.d/* in /home/me/.ssh/config still loads /home/me/.ssh/config.d/legacy.
+combined 2 files into /home/me/.ssh/config: 4 hosts, 2 sections, 2 conflicts.
+
+$ rustorm combine ~/.ssh/config ~/.ssh/config.d/legacy --keep nas
+error: 1 conflict is left undecided; nothing written. Name it with --keep or --replace, or use --on-conflict keep or replace.
+  vps: /home/me/.ssh/config, /home/me/.ssh/config.d/legacy
+
+$ rustorm combine ~/.ssh/config ~/.ssh/config.d/legacy --keep printer
+error: printer is not a conflict; --keep and --replace name a host two files define.
+
+$ rustorm combine ~/.ssh/config ~/.ssh/config.d/cypress --retire
+Host *: Compression yes added from /home/me/.ssh/config.d/cypress.
+Host *: ServerAliveInterval 60 from /home/me/.ssh/config.d/cypress skipped, keeping 30.
+combined 2 files into /home/me/.ssh/config: 5 hosts, 2 sections, 0 conflicts.
+/home/me/.ssh/config.d/cypress retired to /home/me/.ssh/retired/cypress.
+
+$ rustorm combine ~/.ssh/config ~/.ssh/old/legacy --on-conflict keep --retire
+combined 2 files into /home/me/.ssh/config: 4 hosts, 2 sections, 2 conflicts.
+/home/me/.ssh/old/legacy: no Include loads it; not retired.
+
+$ rustorm combine ~/.ssh/config ~/.ssh/config.d/legacy --retire --stdout
+error: --retire moves files after a write; drop --stdout.
 ```
 
 **Exit status**
 
-0 written · 1 conflicts under `fail` · 2 usage, fewer than two files · 3 an input unreadable or the output unwritable.
+0 written · 1 conflicts left undecided under `fail` · 2 usage: fewer than two files, a `--keep` or `--replace` host that is not a conflict or is named twice, `--retire` with `--stdout` · 3 an input unreadable, the output unwritable, or an input not movable.
 
 ### includes
 
@@ -1202,7 +1241,7 @@ Reads the config and reports problems without changing anything: keys not in ssh
 
 On a workspace of several files it checks every file and also reports:
 
-- **A host defined in two files.** ssh uses the first definition it reads; the others are dead text. `rustorm reconcile` drops the identical copies and walks through the real conflicts.
+- **A host defined in two files.** ssh uses the first definition it reads; the others are dead text. `rustorm reconcile` drops the identical copies and walks through the real conflicts; `rustorm cleanup` probes each definition to show which one works and applies it.
 - **An `Include` that loads a backup.** A matched file whose name ends in `~`, `.bak`, `.orig` or `.old`, or contains `.bak.`, looks like a backup, and its hosts shadow or duplicate the real ones.
 - **An `Include` inside `Host *`.** rustorm and ssh both read it as global (see Included files); moving the line above `Host *` says so plainly.
 
@@ -1354,6 +1393,140 @@ error: nas is not defined in two workspace files.
 
 0 no conflict in scope left undecided · 1 conflicts remain, or a `--retire` refused · 2 usage: an unknown or undecidable host, a host decided twice, `--retire` without `FILE`, `--json` or `--list` with a decision, `--all-live` with `--all-copy` · 3 a file unreadable, unwritable or not movable.
 
+### cleanup
+
+Origin: new · Status: v1 · Aliases: `dedupe`
+
+**Synopsis**
+
+```
+rustorm cleanup [<FILE>...] [--no-probe] [--auth] [--timeout <SECS>]
+                [--apply] [--fold <HOST>]...
+```
+
+**Description**
+
+Finds every duplicate host in the workspace, probes each definition to show which ones work, and applies the one that works (D34). Each **finding** is one of:
+
+| Kind | Meaning |
+|---|---|
+| same name | A host defined in two workspace files: the **live** definition, the one ssh reads first (D29), and a **copy**, paired as `reconcile` pairs them. |
+| dead | A name defined twice in one file: the **first** block and a later, **dead** one. ssh takes each key from the first block that sets it, so the dead block's values for those keys are never read. |
+| same target | Different names that reach the same `user@hostname:port` through the same `ProxyJump` or `ProxyCommand`, if any, each resolved through `Host *` the way ssh resolves it. `HostName` defaults to the name, `User` to `$USER`, `Port` to 22. |
+
+With `FILE...` only the copies, dead blocks and same-target names in those files are in scope. `FILE` is a loaded file's name or a path, as for `--file`. Glob patterns and `Host *` never make a finding.
+
+**Probing.** Each definition is probed alone (D35): its block and the workspace's `Host *` blocks, in ssh's reading order, form a temp config in a private directory, mode `0600`, removed after the probe. `Include` and `Match` lines stay out. A copy that ssh never reads is tested exactly as it would work if it were live. Probes run in parallel, each bounded by `--timeout` seconds.
+
+The default probe resolves the `HostName` and opens a TCP connection to its port, sending no data. `--auth` instead runs `ssh -F <temp> -o BatchMode=yes -o ConnectTimeout=<SECS> <name> true`, a login that never prompts. `--no-probe` reports without touching the network. Each definition gets one status:
+
+| Status | Meaning |
+|---|---|
+| `works` | The connection opened; with `--auth`, ssh logged in and ran `true`. |
+| `refused` | Nothing listens on the port. |
+| `dns failure` | The `HostName` does not resolve. |
+| `timeout` | No answer within `--timeout` seconds. |
+| `unreachable` | The system has no route to the address. |
+| `auth failure` | `--auth` only: ssh exited 255 without a connection error, such as a rejected key or an unknown host key. |
+| `needs --auth` | The block sets `ProxyJump` or `ProxyCommand`, which a TCP connect cannot follow. |
+| `not probed` | `--no-probe` was given. |
+
+**Recommendations** (D36):
+
+| Finding | Recommendation |
+|---|---|
+| same name, identical (D30) | Drop the copy's block from the copy's file. |
+| same name, only the copy works | Take the copy: the live block takes the copy's body and metadata lines (D31), and the copy's block leaves the copy's file. |
+| same name, only live works | Keep live; drop the failing copy's block from the copy's file. |
+| same name, both work and differ | None; decide with `rustorm reconcile`. |
+| same name, both fail | None; the report says both fail. |
+| dead, adds nothing | Drop the dead block. A dead block adds nothing when its names all appear on the first block's `Host` line and each of its directives is a single-valued key the first block sets, or a line the first block already has. |
+| dead, adds a key | None; the report names the keys ssh still reads from it. |
+| same target, identical apart from the names | Fold with `--fold`, which `--apply` never does (D37). |
+| same target, settings differ | None; the report names the differing keys. |
+
+A conflict without a status for both sides, from `--no-probe` or `needs --auth`, gets no recommendation until it is probed.
+
+**Report.** Each finding prints `<kind>: <names>`, one line per definition with its role, its `file:line`, its `user@hostname:port` and its status, then `recommendation: ...`. A same-target finding prints the shared target on its first line and each name in place of the role. A blank line separates findings; `N findings in H hosts.` closes the report, or `no duplicates in H hosts.` when there is none. `--json` prints one object, `{"findings": [...], "hosts": H}`; each finding carries `kind` (`same_name`, `dead` or `same_target`), `names`, `target` (the shared target of a same-target finding, else `null`), `definitions` (each `{"role", "name", "file", "line", "section", "text", "target", "status", "detail"}`, `status` in snake case such as `dns_failure`, `null` when not probed, and `detail` the probe's error text or `null`) and `recommendation` (`{"action", "text"}`, `action` one of `take_copy`, `drop_copy`, `drop_identical`, `drop_dead`, `fold` or `null`).
+
+**Applying.** `--apply` probes, then applies every recommendation except folds; `--fold HOST` folds `HOST` into the first other name of its same-target finding (D37). Both read the files again first and refuse a block that changed on disk since the report as stale. Every changed file is checked for writability, then written once after its own backup (see Included files); a failure writes nothing. Messages name each change, then `N findings remain.` or `no findings remain.`, counting the findings left in scope after the run.
+
+**On a terminal**, without `--apply`, `--fold` or `--json`, cleanup prints the report, then asks once per finding that has a recommendation: `[a]pply / [s]kip / [q]uit`, or `[f]old / [s]kip / [q]uit` on a same-target finding. `q`, or the end of input, stops asking and applies the answers given so far. The prompts go to stderr, the messages to stdout.
+
+**Options**
+
+| Option | Effect |
+|---|---|
+| `--no-probe` | Report without probing. Conflicts with `--auth`. |
+| `--auth` | Probe with a `BatchMode` ssh login instead of a TCP connect. |
+| `--timeout <SECS>` | The bound on each probe: the name lookup and the connect, or ssh's `ConnectTimeout`. Default 5; at least 1. |
+| `--apply` | Apply every recommendation except folds. |
+| `--fold <HOST>` | Add `HOST` to the `Host` line of its first same-target name and remove its block. Repeatable. |
+
+**Examples**
+
+On the root `Include ~/.ssh/config.d/*` with `nas` (defined twice), `web` and `web-prod` (both `deploy@web.example.com:22`), `~/.ssh/config.d/vps` holding `vps` with `User admin`, and a stray `~/.ssh/config.d/vps.bak` holding `vps` with `User travis`, where only `travis` may log in:
+
+```
+$ rustorm cleanup --no-probe
+same name: vps
+  live  ~/.ssh/config.d/vps:1      admin@vps.example.com:22   not probed
+  copy  ~/.ssh/config.d/vps.bak:1  travis@vps.example.com:22  not probed
+  recommendation: probe to decide.
+
+dead: nas
+  first  ~/.ssh/config:3   travis@192.168.1.10:22  not probed
+  dead   ~/.ssh/config:15  travis@192.168.1.10:22  not probed
+  recommendation: drop the dead block at ~/.ssh/config:15.
+
+same target: web, web-prod (deploy@web.example.com:22)
+  web       ~/.ssh/config:7   not probed
+  web-prod  ~/.ssh/config:11  not probed
+  recommendation: fold web-prod into web with --fold web-prod.
+
+3 findings in 6 hosts.
+
+$ rustorm --json cleanup --no-probe
+{"findings":[{"kind":"same_name","names":["vps"], ...}
+
+$ rustorm cleanup --auth
+same name: vps
+  live  ~/.ssh/config.d/vps:1      admin@vps.example.com:22   auth failure
+  copy  ~/.ssh/config.d/vps.bak:1  travis@vps.example.com:22  works
+  recommendation: take the copy; only the copy works.
+
+dead: nas
+  first  ~/.ssh/config:3   travis@192.168.1.10:22  works
+  dead   ~/.ssh/config:15  travis@192.168.1.10:22  works
+  recommendation: drop the dead block at ~/.ssh/config:15.
+
+same target: web, web-prod (deploy@web.example.com:22)
+  web       ~/.ssh/config:7   works
+  web-prod  ~/.ssh/config:11  works
+  recommendation: fold web-prod into web with --fold web-prod.
+
+3 findings in 6 hosts.
+
+$ rustorm cleanup --auth --apply
+vps: moved the copy from ~/.ssh/config.d/vps.bak into ~/.ssh/config.d/vps; only the copy works.
+nas: dropped the dead block at ~/.ssh/config:15.
+1 finding remains.
+
+$ rustorm cleanup --fold web-prod
+web-prod folded into web in ~/.ssh/config.
+no findings remain.
+
+$ rustorm cleanup --no-probe
+no duplicates in 3 hosts.
+
+$ rustorm cleanup --no-probe --auth
+error: --no-probe and --auth conflict.
+```
+
+**Exit status**
+
+0 no finding left in scope · 1 findings remain, or a block changed since the report · 2 usage: `--no-probe` with `--auth`, `--json` with `--apply` or `--fold`, `--timeout 0`, a `--fold` host in no same-target finding or whose settings differ · 3 a file unreadable or unwritable.
+
 ### completion
 
 Origin: new (replaces stormssh's contrib bash script) · Status: v1
@@ -1412,7 +1585,7 @@ rustorm 0.1.0
 | `~/.ssh/config` | The file every command reads and writes. `--config` overrides it. Created with mode `0600` when missing. |
 | `~/.ssh/config~` | Backup written before every change (D2). |
 | Included files | Every file the root's `Include` lines load (see Included files). Each is written only when a change routes to it, after a backup to its own `<file>~`, or to `<dir>/.<name>~` when an `Include` pattern would match `<file>~`. |
-| `~/.ssh/retired/` | Copies `reconcile --retire` moved out of the workspace, outside every `Include` glob. |
+| `~/.ssh/retired/` | Files `reconcile --retire` and `combine --retire` moved out of the workspace, outside every `Include` glob. |
 | rustorm config | Command aliases and defaults, TOML. Linux: `$XDG_CONFIG_HOME/rustorm/config.toml` (`~/.config/rustorm/config.toml`). macOS: `~/Library/Application Support/rustorm/config.toml`. Windows: `%AppData%\rustorm\config.toml`. |
 
 rustorm config example:
@@ -1434,6 +1607,7 @@ color = "auto"
 | `USER` | Default user when neither the URI nor `Host *` gives one. |
 | `NO_COLOR` | Disables color when set to any value. |
 | `RUSTORM_CONFIG` | Same as `--config`. The flag wins when both are set. |
+| `RUSTORM_SSH` | The ssh program `cleanup --auth` runs. Default `ssh`, found on `PATH`. |
 
 ## Exit status
 

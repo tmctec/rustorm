@@ -603,13 +603,13 @@ impl Workspace {
     pub fn backup_path_for(&self, i: usize) -> PathBuf {
         let path = &self.files[i].path;
         let plain = crate::io::backup_path(path);
-        let text = absolute_path(&plain).display().to_string();
+        let text = collapse_slashes(&absolute_path(&plain).display().to_string());
         let matched = self
             .includes
             .iter()
             .flat_map(IncludeMatch::walk)
             .filter_map(|m| m.resolved.as_deref())
-            .any(|pattern| glob_match(pattern, &text));
+            .any(|pattern| glob_match(&collapse_slashes(pattern), &text));
         if matched {
             crate::io::dot_backup_path(path)
         } else {
@@ -1598,6 +1598,20 @@ impl Workspace {
     }
 }
 
+/// `a//b` and `a/b` name the same path; an `Include` pattern expanded from a
+/// `HOME` such as `/tmp//x` (what `mktemp` gives when `TMPDIR` ends in `/`)
+/// carries the doubled form.
+fn collapse_slashes(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        if c == '/' && out.ends_with('/') {
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1826,6 +1840,17 @@ mod tests {
         write(&ssh.join("config.d/self"), "Include ~/.ssh/config.d/*\n");
         let ws = Workspace::load_with_home(ssh.join("config.d/self"), Some(tmp.path())).unwrap();
         assert_eq!(ws.backup_path_for(0), ssh.join("config.d/.self~"));
+    }
+
+    #[test]
+    fn workspace_backup_dot_when_home_has_a_doubled_slash() {
+        let tmp = home();
+        let ssh = tmp.path().join(".ssh");
+        let parent = tmp.path().parent().unwrap().display().to_string();
+        let name = tmp.path().file_name().unwrap().to_string_lossy().to_string();
+        let slashed = PathBuf::from(format!("{parent}//{name}"));
+        let ws = Workspace::load_with_home(ssh.join("config"), Some(&slashed)).unwrap();
+        assert_eq!(ws.backup_path_for(1), ssh.join("config.d/.cypress~"));
     }
 
     #[test]
