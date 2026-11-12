@@ -114,7 +114,7 @@ test-gui:  ## Run the rustorm-gui kittest suite
 GUI_WALKTHROUGH ?= target/gui-walkthrough.txt
 
 .PHONY: test-parity
-test-parity:  ## Run the same 18 operations in the TUI and the GUI (and the CLI for reconcile) and compare the files they write
+test-parity:  ## Run the same 22 operations in the TUI and the GUI (and the CLI for reconcile, combine and cleanup) and compare the files they write
 	@./makehelp.sh test -p rustorm-parity
 
 .PHONY: fixtures-read
