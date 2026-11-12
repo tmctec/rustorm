@@ -514,13 +514,8 @@ const TWO_B: &str = "Host a\n    HostName a2\n\nHost b\n    HostName b2\n";
 #[test]
 fn cmb_1_keep_and_replace_override_the_policy_per_host() {
     let inputs = vec![input("one", TWO_A), input("two", TWO_B)];
-    let (result, report) = combine_with(
-        inputs,
-        OnConflict::Fail,
-        &decisions(&["a"], &["b"]),
-        None,
-    )
-    .unwrap();
+    let (result, report) =
+        combine_with(inputs, OnConflict::Fail, &decisions(&["a"], &["b"]), None).unwrap();
     assert_eq!(
         result.render(),
         "Host a\n    HostName a1\n\nHost b\n    HostName b2\n"
@@ -545,7 +540,11 @@ fn cmb_1_keep_and_replace_override_the_policy_per_host() {
     let p = req.preview(None).unwrap();
     assert_eq!(p.conflicts.len(), 2);
     assert_eq!(
-        (p.conflicts[0].name.as_str(), p.conflicts[0].decision, p.conflicts[0].explicit),
+        (
+            p.conflicts[0].name.as_str(),
+            p.conflicts[0].decision,
+            p.conflicts[0].explicit
+        ),
         ("a", Some(HostDecision::Keep), true)
     );
     assert_eq!(p.conflicts[0].second_text, "Host a\n    HostName a2\n");
@@ -562,7 +561,9 @@ fn cmb_1_keep_and_replace_override_the_policy_per_host() {
         .commit(Some(&p.fingerprints), WriteOptions::default(), None)
         .unwrap_err();
     assert_eq!(err.exit_code(), 1);
-    assert!(err.to_string().ends_with("two changed since the preview; preview again."));
+    assert!(err
+        .to_string()
+        .ends_with("two changed since the preview; preview again."));
     assert_eq!(h.read("one"), TWO_A);
 }
 
@@ -602,7 +603,10 @@ fn cmb_3_a_named_host_that_is_no_conflict_is_a_usage_error() {
     );
     let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     let twice = host_decisions(&s(&["a"]), &s(&["a"])).unwrap_err();
-    assert_eq!((twice.exit_code(), twice.to_string()), (2, "a is decided twice.".to_string()));
+    assert_eq!(
+        (twice.exit_code(), twice.to_string()),
+        (2, "a is decided twice.".to_string())
+    );
 }
 
 // TESTMASTER: id=cmb-4 tier=? parallel=yes
@@ -611,11 +615,10 @@ fn cmb_3_a_named_host_that_is_no_conflict_is_a_usage_error() {
 fn cmb_4_retire_moves_an_included_input_into_a_private_retired_dir() {
     use std::os::unix::fs::PermissionsExt;
     let h = Home::new();
-    let out = h.commit(&h.request(&[".ssh/config", ".ssh/config.d/extra"], true)).unwrap();
-    assert_eq!(
-        h.read(".ssh/config"),
-        format!("{HOME_BASE}\n{HOME_EXTRA}")
-    );
+    let out = h
+        .commit(&h.request(&[".ssh/config", ".ssh/config.d/extra"], true))
+        .unwrap();
+    assert_eq!(h.read(".ssh/config"), format!("{HOME_BASE}\n{HOME_EXTRA}"));
     let to = h.path(".ssh/retired/extra");
     assert_eq!(
         out.retired,
@@ -626,11 +629,18 @@ fn cmb_4_retire_moves_an_included_input_into_a_private_retired_dir() {
     );
     assert_eq!(
         out.retired[0].message(),
-        format!("{} retired to {}.", h.path(".ssh/config.d/extra").display(), to.display())
+        format!(
+            "{} retired to {}.",
+            h.path(".ssh/config.d/extra").display(),
+            to.display()
+        )
     );
     assert!(!h.path(".ssh/config.d/extra").exists());
     assert_eq!(std::fs::read_to_string(&to).unwrap(), HOME_EXTRA);
-    let mode = std::fs::metadata(h.path(".ssh/retired")).unwrap().permissions().mode();
+    let mode = std::fs::metadata(h.path(".ssh/retired"))
+        .unwrap()
+        .permissions()
+        .mode();
     assert_eq!(mode & 0o777, 0o700);
     assert_eq!(h.read(".ssh/config~"), HOME_BASE);
 }
@@ -639,7 +649,9 @@ fn cmb_4_retire_moves_an_included_input_into_a_private_retired_dir() {
 #[test]
 fn cmb_5_without_retire_no_file_moves() {
     let h = Home::new();
-    let out = h.commit(&h.request(&[".ssh/config", ".ssh/config.d/extra"], false)).unwrap();
+    let out = h
+        .commit(&h.request(&[".ssh/config", ".ssh/config.d/extra"], false))
+        .unwrap();
     assert!(out.retired.is_empty());
     assert_eq!(h.read(".ssh/config.d/extra"), HOME_EXTRA);
     assert!(!h.path(".ssh/retired").exists());
@@ -657,7 +669,10 @@ fn cmb_6_an_input_no_include_loads_stays_and_says_so() {
     assert_eq!(out.retired[0].to, None);
     assert_eq!(
         out.retired[0].message(),
-        format!("{}: no Include loads it; not retired.", h.path("old/hosts").display())
+        format!(
+            "{}: no Include loads it; not retired.",
+            h.path("old/hosts").display()
+        )
     );
     assert!(h.path("old/hosts").exists());
     assert_eq!(out.retired[1].to, Some(h.path(".ssh/retired/extra")));
@@ -692,7 +707,10 @@ fn cmb_8_retire_with_stdout_is_a_usage_error() {
         .render(Some(h.dir.path()))
         .unwrap_err();
     assert_eq!(err.exit_code(), 2);
-    assert_eq!(err.to_string(), "--retire moves files after a write; drop --stdout.");
+    assert_eq!(
+        err.to_string(),
+        "--retire moves files after a write; drop --stdout."
+    );
     assert_eq!(h.read(".ssh/config.d/extra"), HOME_EXTRA);
 }
 
@@ -701,7 +719,9 @@ fn cmb_8_retire_with_stdout_is_a_usage_error() {
 fn cmb_9_a_taken_retired_name_gets_a_numeric_suffix() {
     let h = Home::new();
     h.write(".ssh/retired/extra", "older\n");
-    let out = h.commit(&h.request(&[".ssh/config", ".ssh/config.d/extra"], true)).unwrap();
+    let out = h
+        .commit(&h.request(&[".ssh/config", ".ssh/config.d/extra"], true))
+        .unwrap();
     assert_eq!(out.retired[0].to, Some(h.path(".ssh/retired/extra.1")));
     assert_eq!(h.read(".ssh/retired/extra"), "older\n");
     assert_eq!(h.read(".ssh/retired/extra.1"), HOME_EXTRA);

@@ -83,13 +83,22 @@ fn plan(heading: &str) -> Option<Vec<Step>> {
             (None, 0),
             (None, 1),
         ],
-        // The base; config.d/cypress and config.d/legacy are seeded by [`extra_files`].
+        // The base; config.d/cypress, config.d/legacy and old/legacy are
+        // seeded by [`extra_files`]. The per-host and --retire examples
+        // each start from a fresh base; --retire moves config.d/cypress, so
+        // it runs after every example that reads it.
         "combine" => vec![
             (f("combine-base"), 0),
             (None, 1),
             (None, 0),
             (None, 0),
             (None, 2),
+            (f("combine-base"), 0),
+            (f("combine-base"), 1),
+            (f("combine-base"), 2),
+            (f("combine-base"), 0),
+            (f("combine-base"), 0),
+            (f("combine-base"), 2),
         ],
         "rename-section" => vec![(f("sections"), 0), (None, 0), (None, 0), (None, 1)],
         "backup" => vec![(f("show"), 0)],
@@ -115,6 +124,18 @@ fn plan(heading: &str) -> Option<Vec<Step>> {
             (None, 0),
             (None, 2),
         ],
+        // The cleanup workspace (config.d/vps and config.d/vps.bak seeded by
+        // [`extra_files`]); `--auth` runs [`STUB_SSH`]. Each command
+        // continues from the last.
+        "cleanup" => vec![
+            (f("cleanup-root"), 1),
+            (None, 1),
+            (None, 1),
+            (None, 1),
+            (None, 0),
+            (None, 0),
+            (None, 2),
+        ],
         "completion" => vec![(f("empty"), 0)],
         "version" => vec![(f("empty"), 0)],
         _ => return None,
@@ -128,6 +149,11 @@ fn extra_files(heading: &str) -> Vec<(&'static str, &'static str)> {
         "combine" => vec![
             ("combine-cypress", "config.d/cypress"),
             ("combine-legacy", "config.d/legacy"),
+            ("combine-legacy", "old/legacy"),
+        ],
+        "cleanup" => vec![
+            ("cleanup-vps", "config.d/vps"),
+            ("cleanup-vps-bak", "config.d/vps.bak"),
         ],
         "includes" => vec![
             ("includes-cypress", "config.d/cypress"),
@@ -143,6 +169,10 @@ fn extra_files(heading: &str) -> Vec<(&'static str, &'static str)> {
         _ => Vec::new(),
     }
 }
+
+/// The ssh `cleanup --auth` runs in the examples (`RUSTORM_SSH`): a login
+/// as `admin` is refused, any other succeeds. It never connects anywhere.
+const STUB_SSH: &str = "#!/bin/sh\nif grep -q 'User admin' \"$2\"; then\n  echo \"$7: Permission denied (publickey).\" >&2\n  exit 255\nfi\nexit 0\n";
 
 struct Example {
     command: String,
@@ -162,7 +192,10 @@ fn blocks() -> Vec<Block> {
     let mut want_block = false;
     let mut lines = DOC.lines();
     while let Some(line) = lines.next() {
-        if let Some(h) = line.strip_prefix("### ").or_else(|| line.strip_prefix("## ")) {
+        if let Some(h) = line
+            .strip_prefix("### ")
+            .or_else(|| line.strip_prefix("## "))
+        {
             heading = h.trim().to_string();
             want_block = false;
         } else if line.trim() == "**Examples**" {
@@ -300,6 +333,7 @@ struct Shell {
     home: PathBuf,
     config: PathBuf,
     last_status: i32,
+    ssh: Option<PathBuf>,
 }
 
 impl Shell {
@@ -310,7 +344,11 @@ impl Shell {
             .env("USER", "travis")
             .env_remove("RUSTORM_CONFIG")
             .env_remove("RUSTORM_ASSUME_TTY")
-            .env_remove("NO_COLOR");
+            .env_remove("NO_COLOR")
+            .env_remove("RUSTORM_SSH");
+        if let Some(ssh) = &self.ssh {
+            cmd.env("RUSTORM_SSH", ssh);
+        }
         cmd
     }
 
@@ -415,19 +453,22 @@ fn fixture(name: &str) -> PathBuf {
         .join(format!("{name}.conf"))
 }
 
-/// Compares line by line. An expected line ending in `, ...]` (the JSON
-/// example's elision) matches any actual line that starts with the text
-/// before it and ends with `]`.
+/// Compares line by line. An expected line ending in `, ...]` or `, ...}`
+/// (a JSON example's elision) matches any actual line that starts with the
+/// text before it and ends with `]` or `}`.
 fn matches(expected: &str, actual: &str) -> bool {
     let e: Vec<&str> = expected.lines().collect();
     let a: Vec<&str> = actual.lines().collect();
     e.len() == a.len()
-        && e.iter()
-            .zip(&a)
-            .all(|(e, a)| match e.strip_suffix(", ...]") {
-                Some(prefix) => a.starts_with(prefix) && a.ends_with(']'),
-                None => e == a,
-            })
+        && e.iter().zip(&a).all(|(e, a)| {
+            if let Some(prefix) = e.strip_suffix(", ...]") {
+                a.starts_with(prefix) && a.ends_with(']')
+            } else if let Some(prefix) = e.strip_suffix(", ...}") {
+                a.starts_with(prefix) && a.ends_with('}')
+            } else {
+                e == a
+            }
+        })
 }
 
 #[test]
@@ -453,7 +494,19 @@ fn every_cli_md_example_matches() {
             home: home.path().to_path_buf(),
             config: ssh.join("config"),
             last_status: 0,
+            ssh: None,
         };
+        if block.heading == "cleanup" {
+            let stub = home.path().join("bin/ssh");
+            std::fs::create_dir_all(stub.parent().unwrap()).unwrap();
+            std::fs::write(&stub, STUB_SSH).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            shell.ssh = Some(stub);
+        }
         let home_text = home.path().display().to_string();
         for (name, rel) in extra_files(&block.heading) {
             let dest = ssh.join(rel);
@@ -498,7 +551,7 @@ fn every_cli_md_example_matches() {
     );
     assert_eq!(
         blocks.len(),
-        25,
+        26,
         "docs/cli.md has one Examples block per command, plus Reading output"
     );
     assert!(

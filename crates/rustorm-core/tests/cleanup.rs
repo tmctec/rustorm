@@ -112,7 +112,13 @@ fn pair_home(live: &str, copy: &str) -> Home {
 }
 
 fn probe(r: &mut CleanupReport, prober: &dyn Prober, secs: u64) {
-    r.probe(prober, Duration::from_secs(secs), DEFAULT_JOBS, None, &mut |_, _| {});
+    r.probe(
+        prober,
+        Duration::from_secs(secs),
+        DEFAULT_JOBS,
+        None,
+        &mut |_, _| {},
+    );
 }
 
 fn statuses(f: &Finding) -> Vec<Option<ProbeStatus>> {
@@ -127,7 +133,10 @@ fn cln_1_same_name_in_root_and_include_names_live_and_copy() {
         ".ssh/config",
         "Include ~/.ssh/config.d/*\n\nHost vps\n    HostName vps.example.com\n    User root\n",
     );
-    h.write(".ssh/config.d/vps", "Host vps\n    HostName vps.example.com\n    User admin\n");
+    h.write(
+        ".ssh/config.d/vps",
+        "Host vps\n    HostName vps.example.com\n    User admin\n",
+    );
     let before = h.snapshot();
     let (_, r) = h.report();
     assert_eq!(r.findings.len(), 1);
@@ -155,11 +164,20 @@ fn cln_2_name_twice_in_one_file_marks_the_later_block_dead() {
     let (_, r) = h.report();
     assert_eq!(r.findings.len(), 1);
     let f = &r.findings[0];
-    assert_eq!((f.kind, f.names.clone()), (FindingKind::Dead, vec!["nas".to_string()]));
+    assert_eq!(
+        (f.kind, f.names.clone()),
+        (FindingKind::Dead, vec!["nas".to_string()])
+    );
     assert_eq!(f.definitions[0].role, Role::First);
-    assert_eq!((f.definitions[1].role, f.definitions[1].block.line), (Role::Dead, 5));
+    assert_eq!(
+        (f.definitions[1].role, f.definitions[1].block.line),
+        (Role::Dead, 5)
+    );
     assert_eq!(f.recommendation.action, Some(Action::DropDead));
-    assert_eq!(f.recommendation.text, "drop the dead block at ~/.ssh/config:5");
+    assert_eq!(
+        f.recommendation.text,
+        "drop the dead block at ~/.ssh/config:5"
+    );
 }
 
 // TESTMASTER: id=cln-3 tier=? parallel=no
@@ -176,10 +194,16 @@ fn cln_3_two_names_one_endpoint_are_same_target() {
     assert_eq!(f.kind, FindingKind::SameTarget);
     assert_eq!(f.names, ["web", "web-prod"]);
     assert_eq!(f.target.as_deref(), Some("deploy@web.example.com:22"));
-    assert_eq!(f.heading(), "same target: web, web-prod (deploy@web.example.com:22)");
+    assert_eq!(
+        f.heading(),
+        "same target: web, web-prod (deploy@web.example.com:22)"
+    );
     // The HostName case and Port 22 differ, so the names do not fold.
     assert_eq!(f.recommendation.action, None);
-    assert_eq!(f.recommendation.text, "settings differ (HostName, Port); left as is");
+    assert_eq!(
+        f.recommendation.text,
+        "settings differ (HostName, Port); left as is"
+    );
 }
 
 // TESTMASTER: id=cln-4 tier=? parallel=no
@@ -219,19 +243,28 @@ fn cln_5_same_hostname_other_port_or_user_is_not_same_target() {
 #[test]
 fn cln_6_listening_port_works() {
     let (_l, port) = listening();
-    let h = pair_home(&host("vps", "127.0.0.1", port), &host("vps", "127.0.0.1", closed_port()));
+    let h = pair_home(
+        &host("vps", "127.0.0.1", port),
+        &host("vps", "127.0.0.1", closed_port()),
+    );
     let (_, mut r) = h.report();
     let started = Instant::now();
     probe(&mut r, &TcpProber, 2);
     assert!(started.elapsed() < Duration::from_secs(2));
-    assert_eq!(r.findings[0].definitions[0].status, Some(ProbeStatus::Works));
+    assert_eq!(
+        r.findings[0].definitions[0].status,
+        Some(ProbeStatus::Works)
+    );
 }
 
 // TESTMASTER: id=cln-7 tier=? parallel=no
 #[test]
 fn cln_7_closed_port_is_refused() {
     let (_l, port) = listening();
-    let h = pair_home(&host("vps", "127.0.0.1", closed_port()), &host("vps", "127.0.0.1", port));
+    let h = pair_home(
+        &host("vps", "127.0.0.1", closed_port()),
+        &host("vps", "127.0.0.1", port),
+    );
     let (_, mut r) = h.report();
     let started = Instant::now();
     probe(&mut r, &TcpProber, 2);
@@ -244,7 +277,10 @@ fn cln_7_closed_port_is_refused() {
 // TESTMASTER: id=cln-8 tier=? parallel=no
 #[test]
 fn cln_8_invalid_name_is_dns_failure() {
-    let h = pair_home(&host("vps", "old-vps.invalid", 22), &host("vps", "older-vps.invalid", 22));
+    let h = pair_home(
+        &host("vps", "old-vps.invalid", 22),
+        &host("vps", "older-vps.invalid", 22),
+    );
     let (_, mut r) = h.report();
     let started = Instant::now();
     probe(&mut r, &TcpProber, 2);
@@ -259,7 +295,10 @@ fn cln_8_invalid_name_is_dns_failure() {
 // TESTMASTER: id=cln-9 tier=? parallel=no
 #[test]
 fn cln_9_non_routable_address_times_out_within_the_bound() {
-    let h = pair_home(&host("vps", "10.255.255.1", 22), &host("vps", "10.255.255.1", 2222));
+    let h = pair_home(
+        &host("vps", "10.255.255.1", 22),
+        &host("vps", "10.255.255.1", 2222),
+    );
     let (_, mut r) = h.report();
     let started = Instant::now();
     probe(&mut r, &TcpProber, 1);
@@ -275,17 +314,26 @@ fn cln_9_non_routable_address_times_out_within_the_bound() {
 #[test]
 fn cln_10_each_definition_is_probed_alone_through_its_block_and_host_star() {
     let (_l, port) = listening();
-    let h = pair_home(&host("vps", "gone.invalid", port), &host("vps", "127.0.0.1", port));
+    let h = pair_home(
+        &host("vps", "gone.invalid", port),
+        &host("vps", "127.0.0.1", port),
+    );
     let (_, mut r) = h.report();
     let f = &r.findings[0];
     let (live, copy) = (&f.definitions[0], &f.definitions[1]);
     assert_eq!(
         live.probe_config,
-        format!("{}\nHost *\n    ServerAliveInterval 30\n", host("vps", "gone.invalid", port))
+        format!(
+            "{}\nHost *\n    ServerAliveInterval 30\n",
+            host("vps", "gone.invalid", port)
+        )
     );
     assert_eq!(
         copy.probe_config,
-        format!("{}\nHost *\n    ServerAliveInterval 30\n", host("vps", "127.0.0.1", port))
+        format!(
+            "{}\nHost *\n    ServerAliveInterval 30\n",
+            host("vps", "127.0.0.1", port)
+        )
     );
     assert!(!copy.probe_config.contains("Include"));
     probe(&mut r, &TcpProber, 2);
@@ -313,7 +361,10 @@ fn cln_11_proxyjump_needs_auth_without_a_tcp_probe() {
         statuses(f),
         [Some(ProbeStatus::NeedsAuth), Some(ProbeStatus::NeedsAuth)]
     );
-    assert_eq!(f.definitions[0].detail.as_deref(), Some("ProxyJump bastion"));
+    assert_eq!(
+        f.definitions[0].detail.as_deref(),
+        Some("ProxyJump bastion")
+    );
     assert_eq!(f.definitions[0].status_label(), "needs --auth");
     assert_eq!(f.recommendation.text, "probe with --auth to decide");
 }
@@ -369,7 +420,14 @@ fn cln_12_auth_runs_batchmode_ssh_through_a_private_temp_config() {
         assert_eq!(words[1], "-F");
         assert_eq!(
             &words[3..],
-            ["-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "vps", "true"]
+            [
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=3",
+                "vps",
+                "true"
+            ]
         );
         // The temp config is gone once the probe is done.
         assert!(!std::path::Path::new(words[2]).exists());
@@ -395,14 +453,21 @@ fn cln_13_live_fails_copy_works_takes_the_copy_with_a_backup() {
         change.messages,
         ["vps: moved the copy from ~/.ssh/config.d/vps.bak into ~/.ssh/config.d/vps; only the copy works."]
     );
-    let backups: Vec<PathBuf> = change.files.iter().map(|&i| ws.backup_path_for(i)).collect();
+    let backups: Vec<PathBuf> = change
+        .files
+        .iter()
+        .map(|&i| ws.backup_path_for(i))
+        .collect();
     ws.save(WriteOptions::default()).unwrap();
     assert_eq!(h.read(".ssh/config.d/vps"), copy);
     assert_eq!(h.read(".ssh/config.d/vps.bak"), "");
     for b in backups {
         assert!(b.exists(), "backup {} missing", b.display());
     }
-    assert_eq!(fs::read_to_string(h.path(".ssh/config.d/.vps~")).unwrap(), live);
+    assert_eq!(
+        fs::read_to_string(h.path(".ssh/config.d/.vps~")).unwrap(),
+        live
+    );
 }
 
 // TESTMASTER: id=cln-14 tier=? parallel=no
@@ -426,7 +491,10 @@ fn cln_14_live_works_copy_fails_drops_the_copy_block() {
     );
     ws.save(WriteOptions::default()).unwrap();
     assert_eq!(h.read(".ssh/config.d/vps"), live);
-    assert_eq!(h.read(".ssh/config.d/vps.bak"), "Host printer\n    HostName 192.168.1.20\n");
+    assert_eq!(
+        h.read(".ssh/config.d/vps.bak"),
+        "Host printer\n    HostName 192.168.1.20\n"
+    );
 }
 
 // TESTMASTER: id=cln-15 tier=? parallel=no
@@ -439,7 +507,10 @@ fn cln_15_both_work_and_differ_stays_undecided_for_reconcile() {
     let (_, mut r) = h.report();
     probe(&mut r, &TcpProber, 2);
     let f = &r.findings[0];
-    assert_eq!(statuses(f), [Some(ProbeStatus::Works), Some(ProbeStatus::Works)]);
+    assert_eq!(
+        statuses(f),
+        [Some(ProbeStatus::Works), Some(ProbeStatus::Works)]
+    );
     assert_eq!(f.recommendation.action, None);
     assert_eq!(
         f.recommendation.text,
@@ -504,7 +575,10 @@ fn cln_17_identical_copy_and_dead_block_are_dropped_live_untouched() {
 fn cln_18_report_and_probe_write_nothing() {
     let (_l, port) = listening();
     let h = pair_home(
-        &format!("{}\nHost nas\n    HostName n\n\nHost nas\n    HostName n\n", host("vps", "127.0.0.1", closed_port())),
+        &format!(
+            "{}\nHost nas\n    HostName n\n\nHost nas\n    HostName n\n",
+            host("vps", "127.0.0.1", closed_port())
+        ),
         &host("vps", "127.0.0.1", port),
     );
     let before = h.snapshot();
@@ -530,7 +604,10 @@ fn cln_19_fold_makes_the_second_name_an_alias_and_removes_its_block() {
     );
     let change = ws.fold_host(&r, "web-prod").unwrap();
     assert_eq!(change.value, "web");
-    assert_eq!(change.messages, ["web-prod folded into web in ~/.ssh/config."]);
+    assert_eq!(
+        change.messages,
+        ["web-prod folded into web in ~/.ssh/config."]
+    );
     ws.save(WriteOptions::default()).unwrap();
     assert_eq!(
         h.read(".ssh/config"),
@@ -566,7 +643,10 @@ fn cln_21_fold_refuses_when_metadata_differs() {
     assert_eq!(r.findings[0].recommendation.action, None);
     let err = ws.fold_host(&r, "web-prod").unwrap_err();
     assert_eq!(err.exit_code(), 2);
-    assert_eq!(err.to_string(), "web-prod differs from web in location; not folded.");
+    assert_eq!(
+        err.to_string(),
+        "web-prod differs from web in location; not folded."
+    );
     assert!(ws.modified().is_empty());
     assert_eq!(h.read(".ssh/config"), text);
 }
@@ -582,7 +662,10 @@ fn cln_22_a_file_changed_since_the_report_is_refused_as_stale() {
     let mut ws = h.load();
     let err = ws.apply_cleanup(&r, &[0]).unwrap_err();
     assert_eq!(err.exit_code(), 1);
-    assert_eq!(err.to_string(), "vps changed since the report; run cleanup again.");
+    assert_eq!(
+        err.to_string(),
+        "vps changed since the report; run cleanup again."
+    );
     assert!(ws.modified().is_empty());
     assert_eq!(h.read(".ssh/config.d/vps.bak"), edited);
     // A fold of a block edited since the report is refused alike.
@@ -621,7 +704,10 @@ fn cln_23_an_unwritable_target_writes_no_file() {
 #[test]
 fn cln_24_json_carries_kind_names_files_and_statuses() {
     let (_l, port) = listening();
-    let h = pair_home(&host("vps", "127.0.0.1", port), &host("vps", "gone.invalid", port));
+    let h = pair_home(
+        &host("vps", "127.0.0.1", port),
+        &host("vps", "gone.invalid", port),
+    );
     h.write(".ssh/config", &format!("{ROOT}\n{TWINS}"));
     let (_, mut r) = h.report();
     probe(&mut r, &TcpProber, 2);
@@ -648,7 +734,9 @@ fn cln_24_json_carries_kind_names_files_and_statuses() {
     assert_eq!(f[1]["target"], "deploy@web.example.com:22");
     assert_eq!(f[1]["recommendation"]["action"], "fold");
     let keys: Vec<&String> = d[0].as_object().unwrap().keys().collect();
-    let mut want = vec!["role", "name", "file", "line", "section", "text", "target", "status", "detail"];
+    let mut want = vec![
+        "role", "name", "file", "line", "section", "text", "target", "status", "detail",
+    ];
     want.sort_unstable();
     let mut got: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
     got.sort_unstable();
@@ -672,7 +760,10 @@ fn cln_25_findings_remain_until_applied_then_none() {
     ws.save(WriteOptions::default()).unwrap();
     let after = h.load().cleanup_report(None, &h.env());
     assert!(after.findings.is_empty());
-    assert_eq!(remaining_findings(after.findings.len()), "no findings remain.");
+    assert_eq!(
+        remaining_findings(after.findings.len()),
+        "no findings remain."
+    );
     assert_eq!(remaining_findings(1), "1 finding remains.");
     assert_eq!(remaining_findings(3), "3 findings remain.");
 }
@@ -689,7 +780,10 @@ fn cln_probes_stream_each_result_and_stop_on_cancel() {
             } else {
                 ProbeStatus::Refused
             };
-            ProbeResult { status, detail: None }
+            ProbeResult {
+                status,
+                detail: None,
+            }
         }
     }
     let h = pair_home(&host("vps", "a", 1), &host("vps", "a", 2));
@@ -704,6 +798,8 @@ fn cln_probes_stream_each_result_and_stop_on_cancel() {
     let cancel = AtomicBool::new(true);
     let (_, mut r) = h.report();
     let mut n = 0;
-    r.probe(&Fixed, DEFAULT_TIMEOUT, 2, Some(&cancel), &mut |_, _| n += 1);
+    r.probe(&Fixed, DEFAULT_TIMEOUT, 2, Some(&cancel), &mut |_, _| {
+        n += 1
+    });
     assert_eq!(n, 0);
 }

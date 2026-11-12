@@ -92,21 +92,50 @@ fn set_tag_and_untag_through_the_cli() {
     let home = Home::new();
     let c = home.file("read.conf", READ_FIXTURE);
     let c = c.to_str().unwrap();
-    let out = home.run(&["--config", c, "set", "d72", "location", "Austin", "--tag", "prod", "--tag", "DB"]);
+    let out = home.run(&[
+        "--config", c, "set", "d72", "location", "Austin", "--tag", "prod", "--tag", "DB",
+    ]);
     assert_eq!(out.status.code(), Some(0), "{}", err(&out));
     let file = std::fs::read_to_string(c).unwrap();
-    assert!(file.contains("# location: Austin\n# tags: db, prod\nHost d72\n"), "{file}");
-    assert!(!file.contains("--tag"), "a flag must never land in the body: {file}");
-    let out = home.run(&["--config", c, "show", "d72", "--filter", "tags,location", "--just-value"]);
+    assert!(
+        file.contains("# location: Austin\n# tags: db, prod\nHost d72\n"),
+        "{file}"
+    );
+    assert!(
+        !file.contains("--tag"),
+        "a flag must never land in the body: {file}"
+    );
+    let out = home.run(&[
+        "--config",
+        c,
+        "show",
+        "d72",
+        "--filter",
+        "tags,location",
+        "--just-value",
+    ]);
     assert_eq!(text(&out), "db\nprod\nAustin\n");
     let out = home.run(&["--config", c, "set", "d72", "--untag", "db"]);
     assert_eq!(out.status.code(), Some(0), "{}", err(&out));
-    let out = home.run(&["--config", c, "show", "d72", "--filter", "tags", "--format", "json"]);
+    let out = home.run(&[
+        "--config", c, "show", "d72", "--filter", "tags", "--format", "json",
+    ]);
     assert_eq!(text(&out), "[{\"tags\":[\"prod\"]}]\n");
     let out = home.run(&["--config", c, "set", "d72"]);
     assert_eq!(out.status.code(), Some(2));
-    assert_eq!(err(&out), "error: set needs KEY VALUE pairs, --tag or --untag.\n");
-    let out = home.run(&["--config", c, "set", "d72", "--", "privateKeyLocation", "-----BEGIN OPENSSH PRIVATE KEY-----"]);
+    assert_eq!(
+        err(&out),
+        "error: set needs KEY VALUE pairs, --tag or --untag.\n"
+    );
+    let out = home.run(&[
+        "--config",
+        c,
+        "set",
+        "d72",
+        "--",
+        "privateKeyLocation",
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+    ]);
     assert_eq!(out.status.code(), Some(1), "{}", err(&out));
     assert_eq!(
         err(&out),
@@ -121,23 +150,52 @@ fn missing_key_exits_4_unless_allowed() {
     let home = Home::new();
     let c = home.file("read.conf", READ_FIXTURE);
     let c = c.to_str().unwrap();
-    let out = home.run(&["--config", c, "show", "d72", "plain", "--filter", "Host,Port,proxyjump", "--format", "csv"]);
+    let out = home.run(&[
+        "--config",
+        c,
+        "show",
+        "d72",
+        "plain",
+        "--filter",
+        "Host,Port,proxyjump",
+        "--format",
+        "csv",
+    ]);
     assert_eq!(out.status.code(), Some(4));
     assert_eq!(text(&out), "Host,Port,proxyjump\nd72,2200,\nplain,2200,\n");
     assert_eq!(
         err(&out),
         "warning: d72 has no 'proxyjump'\nwarning: plain has no 'proxyjump'\n"
     );
-    let out = home.run(&["--config", c, "show", "d72", "--filter", "proxyjump", "--allow-missing"]);
+    let out = home.run(&[
+        "--config",
+        c,
+        "show",
+        "d72",
+        "--filter",
+        "proxyjump",
+        "--allow-missing",
+    ]);
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(text(&out), "");
     assert_eq!(err(&out), "");
     let out = home.run(&["--config", c, "show", "nope", "--filter", "proxyjump"]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(err(&out), "error: nope does not exist.\n");
-    let out = home.run(&["--config", c, "list", "--filter", "Host,tags", "--format", "yml"]);
+    let out = home.run(&[
+        "--config",
+        c,
+        "list",
+        "--filter",
+        "Host,tags",
+        "--format",
+        "yml",
+    ]);
     assert_eq!(out.status.code(), Some(0), "tags is never missing");
-    assert_eq!(text(&out), "- Host: d72\n  tags: [db]\n- Host: plain\n  tags: []\n");
+    assert_eq!(
+        text(&out),
+        "- Host: d72\n  tags: [db]\n- Host: plain\n  tags: []\n"
+    );
 }
 
 /// Selection and format edge cases: --json with another --format, show
@@ -154,14 +212,26 @@ fn read_option_errors_and_selection() {
     assert_eq!(out.status.code(), Some(0), "the same format twice is fine");
     let out = home.run(&["--config", c, "show"]);
     assert_eq!(out.status.code(), Some(2));
-    assert_eq!(err(&out), "error: show needs a host name, --where or --section.\n");
+    assert_eq!(
+        err(&out),
+        "error: show needs a host name, --where or --section.\n"
+    );
     let out = home.run(&["--config", c, "show", "--where", "tags=nothing"]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(text(&out), "");
     let out = home.run(&["--config", c, "show", "--where", "tags=db"]);
     assert_eq!(out.status.code(), Some(0));
     assert!(text(&out).starts_with("# tags: db\nHost d72\n"));
-    let out = home.run(&["--config", c, "list", "--where", "tags!=db", "--filter", "Host", "--just-value"]);
+    let out = home.run(&[
+        "--config",
+        c,
+        "list",
+        "--where",
+        "tags!=db",
+        "--filter",
+        "Host",
+        "--just-value",
+    ]);
     assert_eq!(text(&out), "plain\n");
     let out = home.run(&["--config", c, "show", "d72", "--section", "nope"]);
     assert_eq!(out.status.code(), Some(1));
@@ -180,7 +250,11 @@ fn read_option_errors_and_selection() {
     let out = home.run(&["--config", c, "list", "--where", "nonsense"]);
     assert_eq!(out.status.code(), Some(2));
     let out = home.run(&["--config", c, "list", "--format", "xml"]);
-    assert_eq!(out.status.code(), Some(2), "clap rejects an unknown format name");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "clap rejects an unknown format name"
+    );
 }
 
 #[test]
@@ -1473,4 +1547,192 @@ fn rcl_13_prompt_then_retire() {
     );
     assert!(ssh_text(&home, "config").contains("Host printer\n"));
     assert!(home.path().join(".ssh/retired/cypress.bak").is_file());
+}
+
+// ----- cleanup (docs/cli.md "cleanup") and combine --keep/--replace/--retire:
+// the docs' cleanup workspace under a temp HOME, run without --config -----
+
+/// `~/.ssh/config` (nas twice, web and web-prod on one target, `Host *`),
+/// `config.d/vps` (vps as admin) and `config.d/vps.bak` (vps as travis).
+fn cleanup_home() -> Home {
+    let home = Home::new();
+    for (name, rel) in [
+        ("cleanup-root", "config"),
+        ("cleanup-vps", "config.d/vps"),
+        ("cleanup-vps-bak", "config.d/vps.bak"),
+    ] {
+        let dest = home.path().join(".ssh").join(rel);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::copy(fixture(name), dest).unwrap();
+    }
+    home
+}
+
+// cln-25 (CLI): findings remain → 1, nothing left → 0, usage errors → 2
+#[test]
+fn cln_25_cleanup_exit_codes() {
+    let home = cleanup_home();
+    let before = snapshot(&home);
+    assert_eq!(home.run(&["cleanup", "--no-probe"]).status.code(), Some(1));
+    assert_eq!(home.run(&["dedupe", "--no-probe"]).status.code(), Some(1));
+    for (args, msg) in [
+        (
+            &["cleanup", "--no-probe", "--auth"][..],
+            "error: --no-probe and --auth conflict.\n",
+        ),
+        (
+            &["--json", "cleanup", "--apply"][..],
+            "error: --json prints the report only; drop it to apply or fold.\n",
+        ),
+        (
+            &["cleanup", "--timeout", "0"][..],
+            "error: --timeout must be at least 1.\n",
+        ),
+        (
+            &["cleanup", "--fold", "nas"][..],
+            "error: nas is in no same-target finding.\n",
+        ),
+    ] {
+        let out = home.run(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", err(&out));
+        assert_eq!(err(&out), msg, "{args:?}");
+    }
+    let out = home.run(&["cleanup", "-f", "vps", "--no-probe"]);
+    assert_eq!(out.status.code(), Some(2), "{}", err(&out));
+    assert!(changed(&before, &snapshot(&home)).is_empty());
+    let clean = Home::new();
+    clean.file(".ssh/config", "Host a\n    HostName a.example.com\n");
+    let out = clean.run(&["cleanup"]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert_eq!(text(&out), "no duplicates in 1 host.\n");
+}
+
+// cleanup on a terminal: [a]pply on the dead block, [f]old on the
+// same-target pair; the unprobed conflict asks nothing and remains
+#[test]
+fn cleanup_prompt_applies_and_folds() {
+    let home = cleanup_home();
+    let out = answered(&home, &["cleanup", "--no-probe"], "a\nf\n");
+    assert_eq!(out.status.code(), Some(1), "{}", err(&out));
+    let t = text(&out);
+    assert!(t.starts_with("same name: vps\n"), "{t}");
+    assert!(
+        t.ends_with("3 findings in 6 hosts.\nnas: dropped the dead block at ~/.ssh/config:15.\nweb-prod folded into web in ~/.ssh/config.\n1 finding remains.\n"),
+        "{t}"
+    );
+    let e = err(&out);
+    assert!(
+        e.contains("nas: drop the dead block at ~/.ssh/config:15. [a]pply / [s]kip / [q]uit? "),
+        "{e}"
+    );
+    assert!(
+        e.contains("web, web-prod: fold web-prod into web with --fold web-prod. [f]old / [s]kip / [q]uit? "),
+        "{e}"
+    );
+    assert_eq!(
+        ssh_text(&home, "config"),
+        "Include ~/.ssh/config.d/*\n\nHost nas\n    HostName 192.168.1.10\n    User travis\n\nHost web web-prod\n    HostName web.example.com\n    User deploy\n\nHost *\n    ServerAliveInterval 30\n"
+    );
+    assert!(home.path().join(".ssh/config~").exists());
+}
+
+// cleanup on a terminal: s skips, q and end of input stop; nothing written
+#[test]
+fn cleanup_prompt_skip_and_quit_write_nothing() {
+    let home = cleanup_home();
+    let before = snapshot(&home);
+    for answers in ["s\ns\n", "q\n", ""] {
+        let out = answered(&home, &["cleanup", "--no-probe"], answers);
+        assert_eq!(out.status.code(), Some(1), "{answers:?}: {}", err(&out));
+        assert!(text(&out).ends_with("3 findings remain.\n"), "{answers:?}");
+    }
+    assert!(changed(&before, &snapshot(&home)).is_empty());
+}
+
+// cleanup FILE...: only the copies, dead blocks and same-target names there
+#[test]
+fn cleanup_scopes_to_named_files() {
+    let home = cleanup_home();
+    let out = home.run(&["cleanup", "vps.bak", "--no-probe"]);
+    assert_eq!(out.status.code(), Some(1), "{}", err(&out));
+    let t = text(&out);
+    assert!(t.starts_with("same name: vps\n"), "{t}");
+    assert!(t.ends_with("\n1 finding in 6 hosts.\n"), "{t}");
+}
+
+// cleanup --json: one object; every finding carries kind, names, files
+// and one status per definition
+#[test]
+fn cleanup_json_shape() {
+    let home = cleanup_home();
+    let out = home.run(&["--json", "cleanup", "--no-probe"]);
+    assert_eq!(out.status.code(), Some(1), "{}", err(&out));
+    let v: serde_json::Value = serde_json::from_str(&text(&out)).unwrap();
+    assert_eq!(v["hosts"], 6);
+    let kinds: Vec<&str> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["same_name", "dead", "same_target"]);
+    let live = &v["findings"][0]["definitions"][0];
+    assert_eq!(
+        live["file"],
+        home.path().join(".ssh/config.d/vps").display().to_string()
+    );
+    assert_eq!(live["status"], serde_json::Value::Null);
+    assert_eq!(v["findings"][2]["recommendation"]["action"], "fold");
+}
+
+// combine --keep/--replace on the command line, decided twice, and
+// --json --retire carrying the retired list
+#[test]
+fn combine_per_host_flags_and_json_retire() {
+    let home = Home::new();
+    let a = home.file("a", "Host x\n    HostName x1\n\nHost y\n    HostName y1\n");
+    let b = home.file("b", "Host x\n    HostName x2\n\nHost y\n    HostName y2\n");
+    let (a, b) = (a.to_str().unwrap(), b.to_str().unwrap());
+    let out = home.run(&["combine", a, b, "--keep", "x", "--replace", "y", "--stdout"]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert_eq!(
+        text(&out),
+        "Host x\n    HostName x1\n\nHost y\n    HostName y2\n"
+    );
+    let out = home.run(&["combine", a, b, "--keep", "x", "--replace", "x"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(err(&out), "error: x is decided twice.\n");
+    let root = home.file(".ssh/config", "Include config.d/*\n");
+    std::fs::create_dir_all(home.path().join(".ssh/config.d")).unwrap();
+    let inc = home.file(".ssh/config.d/extra", "Host e\n    HostName e\n");
+    let out = home.run(&[
+        "--json",
+        "combine",
+        root.to_str().unwrap(),
+        inc.to_str().unwrap(),
+        "--retire",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    let v: serde_json::Value = serde_json::from_str(&text(&out)).unwrap();
+    assert_eq!(v["retired"][0]["from"], inc.display().to_string());
+    assert_eq!(
+        v["retired"][0]["to"],
+        home.path().join(".ssh/retired/extra").display().to_string()
+    );
+    assert!(!inc.exists());
+}
+
+// completion knows cleanup, its alias and its flags
+#[test]
+fn completion_lists_cleanup() {
+    let home = Home::new();
+    let bash = text(&home.run(&["completion", "bash"]));
+    assert!(bash.contains("cleanup") && bash.contains("dedupe"));
+    assert!(bash.contains("--no-probe") && bash.contains("--fold"));
+    assert!(bash.contains("--fold|--keep|--replace|--take-copy|--keep-live)"));
+    let zsh = text(&home.run(&["completion", "zsh"]));
+    assert!(
+        zsh.contains("--fold=[") && zsh.contains(":HOST:_rustorm_hosts'"),
+        "zsh host flags"
+    );
 }

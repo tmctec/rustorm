@@ -1129,7 +1129,7 @@ error: combine needs at least two files.
 
 $ rustorm combine ~/.ssh/config ~/.ssh/config.d/legacy --keep nas --replace vps
 warning: Include config.d/* in /home/me/.ssh/config still loads /home/me/.ssh/config.d/legacy.
-combined 2 files into /home/me/.ssh/config: 6 hosts, 2 sections, 2 conflicts.
+combined 2 files into /home/me/.ssh/config: 4 hosts, 2 sections, 2 conflicts.
 
 $ rustorm combine ~/.ssh/config ~/.ssh/config.d/legacy --keep nas
 error: 1 conflict is left undecided; nothing written. Name it with --keep or --replace, or use --on-conflict keep or replace.
@@ -1145,7 +1145,7 @@ combined 2 files into /home/me/.ssh/config: 5 hosts, 2 sections, 0 conflicts.
 /home/me/.ssh/config.d/cypress retired to /home/me/.ssh/retired/cypress.
 
 $ rustorm combine ~/.ssh/config ~/.ssh/old/legacy --on-conflict keep --retire
-combined 2 files into /home/me/.ssh/config: 6 hosts, 2 sections, 2 conflicts.
+combined 2 files into /home/me/.ssh/config: 4 hosts, 2 sections, 2 conflicts.
 /home/me/.ssh/old/legacy: no Include loads it; not retired.
 
 $ rustorm combine ~/.ssh/config ~/.ssh/config.d/legacy --retire --stdout

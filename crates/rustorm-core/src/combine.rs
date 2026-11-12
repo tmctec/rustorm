@@ -648,7 +648,10 @@ pub struct CombinePreview {
 impl CombinePreview {
     /// Conflicts without a decision.
     pub fn undecided(&self) -> Vec<&PreviewConflict> {
-        self.conflicts.iter().filter(|c| c.decision.is_none()).collect()
+        self.conflicts
+            .iter()
+            .filter(|c| c.decision.is_none())
+            .collect()
     }
 
     /// True when every conflict has a decision, so a commit can write.
@@ -674,10 +677,7 @@ impl CombineRetired {
     pub fn message(&self) -> String {
         match &self.to {
             Some(to) => format!("{} retired to {}.", self.from.display(), to.display()),
-            None => format!(
-                "{}: no Include loads it; not retired.",
-                self.from.display()
-            ),
+            None => format!("{}: no Include loads it; not retired.", self.from.display()),
         }
     }
 }
@@ -739,7 +739,9 @@ pub struct CombineRequest {
 impl CombineRequest {
     /// The file the result is written to.
     pub fn output_path(&self) -> Option<&Path> {
-        self.output.as_deref().or(self.inputs.first().map(PathBuf::as_path))
+        self.output
+            .as_deref()
+            .or(self.inputs.first().map(PathBuf::as_path))
     }
 
     /// Reads the inputs and renders the merge without writing. Undecided
@@ -778,7 +780,10 @@ impl CombineRequest {
                 "--retire moves files after a write; drop --stdout.".to_string(),
             ));
         }
-        let inputs = load_inputs(&self.inputs)?.into_iter().map(|(i, _)| i).collect();
+        let inputs = load_inputs(&self.inputs)?
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
         let (result, report) = combine_with(inputs, self.policy, &self.decisions, home)?;
         Ok((result.render(), report))
     }
@@ -822,8 +827,8 @@ impl CombineRequest {
             .to_path_buf();
         let (result, report) = combine_with(inputs, self.policy, &self.decisions, home)?;
         let moves = if self.retire {
-            let home = home
-                .ok_or_else(|| Error::Usage("no home directory to retire into.".to_string()))?;
+            let home =
+                home.ok_or_else(|| Error::Usage("no home directory to retire into.".to_string()))?;
             plan_retire(&self.inputs, &report, &output, home, &patterns)?
         } else {
             Vec::new()

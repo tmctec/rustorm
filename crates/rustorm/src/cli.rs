@@ -22,7 +22,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_backup: bool,
 
-    /// Emit JSON on list, show, dump, search, check, includes and reconcile
+    /// Emit JSON on list, show, dump, search, check, includes, reconcile, cleanup and combine
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -286,6 +286,15 @@ pub enum Cmd {
         /// What to do with a name two files define: fail, keep or replace
         #[arg(long, value_name = "POLICY", default_value = "fail")]
         on_conflict: String,
+        /// Keep the earlier block of the conflict HOST (repeatable)
+        #[arg(long, value_name = "HOST")]
+        keep: Vec<String>,
+        /// Put the later block of the conflict HOST in the earlier one's place (repeatable)
+        #[arg(long, value_name = "HOST")]
+        replace: Vec<String>,
+        /// After the write, move each later input an Include still loads to ~/.ssh/retired/
+        #[arg(long)]
+        retire: bool,
         /// Print the result instead of writing a file
         #[arg(long)]
         stdout: bool,
@@ -341,6 +350,28 @@ pub enum Cmd {
         #[arg(long)]
         retire: bool,
     },
+    /// Find duplicate hosts, probe which definitions work, and apply the working one
+    #[command(visible_alias = "dedupe")]
+    Cleanup {
+        /// Only the copies, dead blocks and same-target names in these workspace files
+        #[arg(value_name = "FILE")]
+        files: Vec<String>,
+        /// Report without probing
+        #[arg(long)]
+        no_probe: bool,
+        /// Probe with a BatchMode ssh login instead of a TCP connect
+        #[arg(long)]
+        auth: bool,
+        /// The bound on each probe, in seconds
+        #[arg(long, value_name = "SECS", default_value_t = 5)]
+        timeout: u64,
+        /// Apply every recommendation except folds
+        #[arg(long)]
+        apply: bool,
+        /// Add HOST to its first same-target name's Host line and remove its block (repeatable)
+        #[arg(long, value_name = "HOST")]
+        fold: Vec<String>,
+    },
     /// Print a shell completion script
     Completion {
         /// Shell
@@ -377,6 +408,7 @@ impl Cmd {
             Cmd::Check => "check",
             Cmd::Includes => "includes",
             Cmd::Reconcile { .. } => "reconcile",
+            Cmd::Cleanup { .. } => "cleanup",
             Cmd::Completion { .. } => "completion",
             Cmd::Version => "version",
         }

@@ -35,9 +35,7 @@ use serde::{Deserialize, Serialize};
 use crate::keys::is_multi_valued;
 use crate::model::HostBlock;
 use crate::ops::Env;
-use crate::reconcile::{
-    key_diffs, same_definition, BlockRef, Decision, PairKind, ReconcileReport,
-};
+use crate::reconcile::{key_diffs, same_definition, BlockRef, Decision, PairKind, ReconcileReport};
 use crate::workspace::{Change, Workspace, WorkspaceLocation};
 use crate::{Error, Result};
 
@@ -45,7 +43,7 @@ use crate::{Error, Result};
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How many probes run at once by default.
-pub const DEFAULT_JOBS: usize = 8;
+pub const DEFAULT_JOBS: usize = 16;
 
 /// The kind of a finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -464,7 +462,9 @@ impl CleanupReport {
         for f in &mut self.findings {
             let mut hit = false;
             for d in &mut f.definitions {
-                if d.block.file == target.file && d.block.line == target.line && d.name == target.name
+                if d.block.file == target.file
+                    && d.block.line == target.line
+                    && d.name == target.name
                 {
                     d.status = Some(result.status);
                     d.detail = result.detail.clone();
@@ -536,7 +536,7 @@ fn finding_text(f: &Finding) -> String {
             .zip(&widths)
             .map(|(cell, w)| format!("{cell:<w$}"))
             .collect();
-        out.push_str(&format!("  {}", cells.join("  ")).trim_end().to_string());
+        out.push_str(format!("  {}", cells.join("  ")).trim_end());
         out.push('\n');
     }
     out.push_str(&format!("  recommendation: {}.\n", f.recommendation.text));
@@ -582,7 +582,11 @@ impl Prober for TcpProber {
         if let Some(proxy) = &target.endpoint.proxy {
             return ProbeResult::new(ProbeStatus::NeedsAuth, Some(proxy.clone()));
         }
-        tcp_probe(&target.endpoint.hostname, target.endpoint.port, target.timeout)
+        tcp_probe(
+            &target.endpoint.hostname,
+            target.endpoint.port,
+            target.timeout,
+        )
     }
 }
 
@@ -814,7 +818,11 @@ fn is_pattern(name: &str) -> bool {
 }
 
 fn concrete(block: &HostBlock) -> Vec<String> {
-    block.names().into_iter().filter(|n| !is_pattern(n)).collect()
+    block
+        .names()
+        .into_iter()
+        .filter(|n| !is_pattern(n))
+        .collect()
 }
 
 type Rank = Vec<(usize, usize)>;
@@ -833,7 +841,12 @@ fn probe_chain<'a>(
         .map(|(_, l)| ws.host(*l))
         .collect();
     chain.push(ws.host(at));
-    chain.extend(stars.iter().filter(|(r, _)| r > rank).map(|(_, l)| ws.host(*l)));
+    chain.extend(
+        stars
+            .iter()
+            .filter(|(r, _)| r > rank)
+            .map(|(_, l)| ws.host(*l)),
+    );
     chain
 }
 
@@ -869,7 +882,8 @@ fn expand_host(value: &str, name: &str) -> String {
 }
 
 fn resolve(chain: &[&HostBlock], name: &str, env: &Env) -> Endpoint {
-    let hostname = first_value(chain, "HostName").map_or_else(|| name.to_string(), |h| expand_host(&h, name));
+    let hostname =
+        first_value(chain, "HostName").map_or_else(|| name.to_string(), |h| expand_host(&h, name));
     let user = first_value(chain, "User")
         .or_else(|| env.user.clone())
         .unwrap_or_default();
@@ -896,7 +910,9 @@ fn chain_text(chain: &[&HostBlock]) -> String {
     for b in chain {
         let mut t = String::new();
         for l in b.lines() {
-            if l.directive().is_some_and(|d| d.key.eq_ignore_ascii_case("include")) {
+            if l.directive()
+                .is_some_and(|d| d.key.eq_ignore_ascii_case("include"))
+            {
                 continue;
             }
             t.push_str(l.text());
@@ -1002,8 +1018,22 @@ impl Workspace {
             let live = p.live.as_ref().expect("a pair has a live side");
             let name = p.names.first().cloned().unwrap_or_else(|| p.name.clone());
             let defs = vec![
-                self.definition(Role::Live, &name, live.location(), &rank_of(live.location()), &stars, env),
-                self.definition(Role::Copy, &name, p.copy.location(), &rank_of(p.copy.location()), &stars, env),
+                self.definition(
+                    Role::Live,
+                    &name,
+                    live.location(),
+                    &rank_of(live.location()),
+                    &stars,
+                    env,
+                ),
+                self.definition(
+                    Role::Copy,
+                    &name,
+                    p.copy.location(),
+                    &rank_of(p.copy.location()),
+                    &stars,
+                    env,
+                ),
             ];
             findings.push(Finding {
                 kind: FindingKind::SameName,
@@ -1075,14 +1105,24 @@ impl Workspace {
             if names.is_empty() {
                 continue;
             }
-            if reps.iter().any(|(_, ns, _)| ns.iter().any(|n| names.contains(n))) {
+            if reps
+                .iter()
+                .any(|(_, ns, _)| ns.iter().any(|n| names.contains(n)))
+            {
                 continue;
             }
             let chain = probe_chain(self, b.at, &stars, &b.rank);
             let endpoint = resolve(&chain, &names[0], env);
             reps.push((b, names, endpoint));
         }
-        let key = |e: &Endpoint| (e.user.clone(), e.hostname.to_ascii_lowercase(), e.port, e.proxy.clone());
+        let key = |e: &Endpoint| {
+            (
+                e.user.clone(),
+                e.hostname.to_ascii_lowercase(),
+                e.port,
+                e.proxy.clone(),
+            )
+        };
         let mut grouped: Vec<usize> = Vec::new();
         for i in 0..reps.len() {
             if grouped.contains(&i) {
@@ -1221,7 +1261,9 @@ impl Workspace {
                 .items
                 .iter()
                 .position(|q| {
-                    q.live.as_ref().is_some_and(|l| l.index == live.index && l.text == live.text)
+                    q.live
+                        .as_ref()
+                        .is_some_and(|l| l.index == live.index && l.text == live.text)
                         && q.copy.index == old.copy.index
                         && q.copy.text == old.copy.text
                 })
@@ -1300,7 +1342,10 @@ impl Workspace {
                 return Err(Error::CleanupStale(host.to_string()));
             }
         }
-        let (a, b) = (self.host(into.block.location()), self.host(from.block.location()));
+        let (a, b) = (
+            self.host(into.block.location()),
+            self.host(from.block.location()),
+        );
         if !same_definition(a, b) {
             let keys: Vec<String> = key_diffs(a, b).into_iter().map(|k| k.key).collect();
             return Err(Error::Undecidable {
@@ -1361,7 +1406,11 @@ mod tests {
             ProbeStatus::AuthFailure
         );
         assert_eq!(
-            classify_ssh(Some(255), "ssh: connect to host y port 22: Connection refused\n").status,
+            classify_ssh(
+                Some(255),
+                "ssh: connect to host y port 22: Connection refused\n"
+            )
+            .status,
             ProbeStatus::Refused
         );
         assert_eq!(
@@ -1369,7 +1418,11 @@ mod tests {
             ProbeStatus::DnsFailure
         );
         assert_eq!(
-            classify_ssh(Some(255), "ssh: connect to host y port 22: Operation timed out\n").status,
+            classify_ssh(
+                Some(255),
+                "ssh: connect to host y port 22: Operation timed out\n"
+            )
+            .status,
             ProbeStatus::Timeout
         );
         assert_eq!(classify_ssh(Some(1), "").status, ProbeStatus::Works);
@@ -1383,6 +1436,9 @@ mod tests {
         .unwrap();
         let h = c.hosts();
         assert!(dead_adds(h[0], h[1]).is_empty());
-        assert_eq!(dead_adds(h[0], h[2]), ["the name b", "Port", "IdentityFile"]);
+        assert_eq!(
+            dead_adds(h[0], h[2]),
+            ["the name b", "Port", "IdentityFile"]
+        );
     }
 }
