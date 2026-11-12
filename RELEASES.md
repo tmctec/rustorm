@@ -1,5 +1,19 @@
 # Releases
 
+## 2026-11-12 — Find duplicate hosts, see which one works, and merge files from the UIs
+
+**New**
+- `rustorm cleanup` finds every duplicate host in your ssh config: a host defined in two files, a host defined twice in one file, and two names that reach the same machine. It tests each definition on its own, including the copy ssh never reads, and tells you which ones connect. `--auth` tests with a real ssh login.
+- `rustorm cleanup --apply` keeps the definition that works and removes the dead copies, backing up every file first. `--fold` turns a second name for the same machine into an extra name on the first.
+- Merge config files from the terminal UI (press `M`) or the desktop app (**Combine…**): pick the files, preview the result, decide each clash, and write. Nothing changes until you have decided every clash.
+- The terminal UI (press `X`) and the desktop app (**Cleanup…**) list your duplicates and test them in the background, so results appear as they come in.
+
+**Improved**
+- `rustorm combine` lets you decide each clashing host with `--keep` and `--replace`, and `--retire` moves the merged files out of your `Include` wildcard so ssh stops reading them.
+
+**Fixed**
+- When your home directory path contained a doubled slash, a change to an included file could leave a backup that rustorm and ssh then read as a duplicate host.
+
 ## 2026-10-03 — Clean up backups and duplicate hosts, one host at a time
 
 **New**
